@@ -77,6 +77,17 @@ The `-d` option, or the **Monitor** prompt, accepts any of these. Folders are al
 | A file name, or part of one | `-d HS_root.log`, `-d ONCOR` |
 | A folder plus a name | `-d /mnt/finance/ONCOR` |
 
+## Telling logs apart: share ID
+
+When several logs are scanned together, every result shows the **share ID** it came from. The ID is read from each log's first line (`Assimilation started for share=126 obsid=192 …`). That matters because running logs are all named `HS_root.log`. The share ID appears in:
+
+- **FILES table:** a `share` column.
+- **Count by type, error guide and summaries:** which shares each error type came from, for example `(shares 126, 301)`, or `(share 301 · 2 logs)` when one share has several logs.
+- **Live feed, highlights and plain output:** each line is tagged, for example `[share 126]`.
+- **Exports:** the error log, the matches CSV (`share` column), and the unknown-entry file. Summaries also give the obsid.
+
+The ID is read as soon as a log is found, so it's known even with `--from-end`. A log without the header line shows `share ?`.
+
 ## Watch items
 
 At startup, choose which items feed the live list of items of concern (`--select all`, `none`, `default`, or `1-5,8`). Error types are always counted.
@@ -240,7 +251,7 @@ If you answer **y**, it asks for a folder (default: the output directory, `/tmp`
 | File | Contents |
 |---|---|
 | `catalyst_<host>_<timestamp>_summary.md` | The exit summary in Markdown: highlights, files, count by type, watch items, top unmapped SIDs, per-file breakdown, and any log entries not recognised |
-| `catalyst_<host>_<timestamp>_errors.log` | Every ERROR, ISSUE and NOTE line found, each with log time, severity, type, log file and line number, affected path, and the original log line. Warnings are counted in the summary but not listed, since logs can have millions of them. |
+| `catalyst_<host>_<timestamp>_errors.log` | Every ERROR, ISSUE and NOTE line found, each with log time, severity, type, share ID, log file and line number, affected path, and the original log line. Warnings are counted in the summary but not listed, since logs can have millions of them. |
 
 Use `-x [DIR]` to export without being asked (default folder: the output directory). If you're also saving with `-o` / `-u`, the exported files are included in the upload bundle.
 
@@ -284,6 +295,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.5.3 | Share ID (from each log's header) shown wherever results from several logs appear: FILES table, count by type, error guide, live feed, highlights, summaries, error log, CSV, unknown-entry file. |
 | 2.5.2 | `e` opens an error guide while the scan keeps running: types found so far first (live counts, NEW tags, SID lookups), then the other known types. Arrow/Page/Home/End keys. |
 | 2.5.1 | Completed logs shown in their dated folder: `<share>/assimilation-logs/<date-time stamp>/<log>`. |
 | 2.5.0 | Notes that monitoring running assimilations requires Hammerspace support, and that end users examine completed logs in `<share>/assimilation-logs/`. Corrected where finished logs are moved to. |

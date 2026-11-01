@@ -7,7 +7,7 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.5.2
+  Version  : 2.5.3
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Platform : Linux - the Hammerspace Anvil is Linux-based, and that is where
@@ -19,6 +19,11 @@ Hammerspace C.A.T.A.L.Y.S.T.
              HTTP upload)
 
   Changelog
+    2.5.3  2026-11-01  Share id (from "Assimilation started for share=N")
+                       shown wherever results from several logs appear:
+                       FILES table, count by type and error guide (which
+                       shares each type came from), live feed, highlights,
+                       summaries, error log, CSV and unknown-entry file.
     2.5.2  2026-11-01  "e" opens an error guide while the scan keeps running:
                        error types found so far first (worst, most frequent,
                        live counts, NEW tags, SID lookups), then the other
@@ -153,7 +158,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.5.2"
+__version__ = "2.5.3"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -358,7 +363,7 @@ def guide_lines(engine, width, known_before=None):
         nf = len(engine.type_files[(sev, t)])
         new = (f" {MAGENTA}NEW{RESET}" if known_before is not None and (sev, t) not in known_before else "")
         out.append(f"  {SEV_COLOR[sev]}{sev:5s}{RESET} {BOLD}{n:>11,}{RESET}  {BOLD}{t}{RESET}"
-                   f"  {GRAY}({nf} file{'s' if nf != 1 else ''}){RESET}{new}")
+                   f"  {GRAY}({engine.shares_for((sev, t))}){RESET}{new}")
         e = _explanation_for(t)
         if e:
             explained.add(e["key"])
@@ -646,12 +651,23 @@ class FileState:
         self.rec_start = 0      # line number where the current entry starts
         self.rec_unknown = None  # unrecognised type found in the current entry, if any
         self.rec_unknown_idx = 0
+        self.share = None     # share id from the "Assimilation started for share=N obsid=M" header
+        self.obsid = None
         self.fh = None        # kept open so we can finish reading after the log is moved/deleted
         self.gone = False     # path no longer points at this log (moved to the share's assimilation-logs / deleted)
 
     @property
     def items(self):
         return sum(self.imported.values()) + self.issues
+
+    @property
+    def share_label(self):
+        return f"share {self.share}" if self.share else "share ?"
+
+    @property
+    def tag(self):
+        """File name plus share id, used wherever several logs are shown together."""
+        return f"{self.name} [{self.share_label}]"
 
     def status(self, live, stall_secs):
         if self.completed:
@@ -693,7 +709,7 @@ class Engine:
                 self.errlog.write(f"# {__fullname__}\n# v{__version__} - full log of errors and issues"
                                   f" (ERROR, ISSUE, NOTE; warnings are counted in the summary only)\n"
                                   f"# Host: {HOST}   Started: {time.strftime('%a %b %d %H:%M:%S %Z %Y')}\n"
-                                  f"# Format: <log time>  <severity>  <type>  <log file>:<line>  path=<affected path>\n"
+                                  f"# Format: <log time>  <severity>  <type>  share <id>  <log file>:<line>  path=<affected path>\n"
                                   f"#         followed by the log line itself, indented\n\n")
             except OSError:
                 self.errlog = None
@@ -704,15 +720,43 @@ class Engine:
         self.csv = None
         if matches_csv:
             import csv
+            os.makedirs(os.path.dirname(os.path.abspath(matches_csv)), exist_ok=True)
             fh = open(matches_csv, "w", newline="", encoding="utf-8")
             self.csv = (fh, csv.writer(fh))
-            self.csv[1].writerow(["file", "line", "timestamp", "severity", "type", "watch_items", "path", "text"])
+            self.csv[1].writerow(["file", "share", "line", "timestamp", "severity", "type", "watch_items", "path", "text"])
+
+    def shares_for(self, key):
+        """'share 126', 'shares 9, 126' (+ log count when it differs) for an error type."""
+        idx = self.type_files.get(key, ())
+        ids = sorted({self.files[i].share or "?" for i in idx}, key=lambda x: (not x.isdigit(), int(x) if x.isdigit() else 0))
+        txt = ("share " if len(ids) == 1 else "shares ") + ", ".join(ids[:5]) + (f" +{len(ids) - 5}" if len(ids) > 5 else "")
+        if len(idx) != len(ids):
+            txt += f" · {len(idx)} logs"
+        return txt
 
     def add_file(self, path):
         fs = FileState(path, len(self.files))
+        self._peek_header(fs)
         self.files.append(fs)
         self.by_path[path] = fs
         return fs
+
+    @staticmethod
+    def _peek_header(fs):
+        """Read the share/obsid from the log's first line up front, so they're known even when we
+        don't read the log from the start (live --from-end) or before replay reaches it."""
+        try:
+            with open(fs.path, "rb") as f:
+                first = f.readline(4096).decode("utf-8", "replace")
+        except OSError:
+            return
+        if first.startswith("Assimilation started"):
+            m = re.search(r"\bshare=(\d+)", first)
+            if m:
+                fs.share = m.group(1)
+            m = re.search(r"\bobsid=(\d+)", first)
+            if m:
+                fs.obsid = m.group(1)
 
     # -- classification --------------------------------------------------
     SKIP_REASONS = {
@@ -828,6 +872,12 @@ class Engine:
 
         if line.startswith("Assimilation started"):
             fs.started = line
+            m = re.search(r"\bshare=(\d+)", line)
+            if m:
+                fs.share = m.group(1)
+            m = re.search(r"\bobsid=(\d+)", line)
+            if m:
+                fs.obsid = m.group(1)
             ts = line_ts(line)
             if ts and fs.first_ts is None:
                 fs.first_ts = ts
@@ -868,7 +918,7 @@ class Engine:
             fs.types[cls] += 1
             self.type_files[cls].add(fs.idx)
             if self.errlog and cls[0] in self.ERRLOG_SEVS:
-                self._errlog_write(fs.last_ts, cls[0], cls[1], f"{fs.path}:{fs.lineno}", fs.cur_path, line.strip())
+                self._errlog_write(fs.last_ts, cls[0], cls[1], f"{fs.share_label}  {fs.path}:{fs.lineno}", fs.cur_path, line.strip())
             if cls[0] == "NOTE" and fs.rec_unknown is None:
                 fs.rec_unknown = cls[1]
                 fs.rec_unknown_idx = len(fs.rec) - 1
@@ -900,9 +950,9 @@ class Engine:
             entry = (tstr, fs.name, sev, typ, fs.cur_path, line.strip(), labels, fs.lineno, fs.path)
             self.feed.append(entry)
             if self.csv:
-                self.csv[1].writerow([fs.path, fs.lineno, tstr, sev, typ, labels, fs.cur_path, line.rstrip()])
+                self.csv[1].writerow([fs.path, fs.share or "", fs.lineno, tstr, sev, typ, labels, fs.cur_path, line.rstrip()])
             if self.plain:
-                self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name}:{fs.lineno} {typ} | {fs.cur_path} | {line.strip()[:200]}")
+                self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name}:{fs.lineno} [{fs.share_label}] {typ} | {fs.cur_path} | {line.strip()[:200]}")
 
     def flush_entry(self, fs):
         """Keep the finished log entry if it contained an unrecognised line."""
@@ -914,7 +964,7 @@ class Engine:
             if u is not None:
                 u["count"] += 1
                 if len(u["examples"]) < UNKNOWN_MAX_EXAMPLES:
-                    u["examples"].append((fs.path, fs.rec_start, list(fs.rec), fs.rec_unknown_idx))
+                    u["examples"].append((fs.path, fs.rec_start, list(fs.rec), fs.rec_unknown_idx, fs.share_label))
         fs.rec_unknown = None
 
     def _errlog_write(self, ts, sev, typ, where, path, text):
@@ -928,10 +978,10 @@ class Engine:
     def event(self, sev, typ, fs, text):
         tstr = time.strftime("%Y-%m-%d %H:%M:%S")
         if self.errlog and sev in self.ERRLOG_SEVS:
-            self._errlog_write(time.time(), sev, typ + " (monitor)", fs.path, fs.path, text)
+            self._errlog_write(time.time(), sev, typ + " (monitor)", f"{fs.share_label}  {fs.path}", fs.path, text)
         self.feed.append((tstr, fs.name, sev, typ, fs.path, text, "monitor", fs.lineno, fs.path))
         if self.plain:
-            self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name} {typ} | {text}")
+            self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name} [{fs.share_label}] {typ} | {text}")
 
     def _say(self, text):
         """Print a feed line; if the reader went away (e.g. piped into head), stop printing but keep counting."""
@@ -960,29 +1010,29 @@ class Engine:
         for fs in self.files:
             st = fs.status(live, stall_secs)
             if st == "VANISHED":
-                out.append(("ERROR", f"{fs.name}: log disappeared before 'Assimilation complete' -"
+                out.append(("ERROR", f"{fs.tag}: log disappeared before 'Assimilation complete' -"
                                      f" assimilation aborted/removed, or log moved early"))
             elif st == "STALLED":
-                out.append(("ERROR", f"{fs.name}: no growth for {int(time.time() - fs.last_growth)}s and no"
+                out.append(("ERROR", f"{fs.tag}: no growth for {int(time.time() - fs.last_growth)}s and no"
                                      f" 'Assimilation complete' - job stalled, killed, or log moved"))
             elif st == "INCOMPLETE":
-                out.append(("ERROR", f"{fs.name}: ended without 'Assimilation complete' - run did not finish"
+                out.append(("ERROR", f"{fs.tag}: ended without 'Assimilation complete' - run did not finish"
                                      f" (or log was copied mid-run)"))
             if fs.truncated_tail:
-                out.append(("ISSUE", f"{fs.name}: last line is cut off mid-write"))
+                out.append(("ISSUE", f"{fs.tag}: last line is cut off mid-write"))
             if fs.started is None and fs.lineno > 0:
-                out.append(("NOTE", f"{fs.name}: no 'Assimilation started' header (log may be partial)"))
+                out.append(("NOTE", f"{fs.tag}: no 'Assimilation started' header (log may be partial)"))
             items = fs.items
             if items >= 10 and fs.issues / items > 0.10:
-                out.append(("ERROR", f"{fs.name}: {fs.issues}/{items} items ({fs.issues * 100 // items}%) had"
+                out.append(("ERROR", f"{fs.tag}: {fs.issues}/{items} items ({fs.issues * 100 // items}%) had"
                                      f" 'Issues during import' - most of this share is not coming across"))
             pd = sum(c for (sev, t), c in fs.types.items() if t.startswith("Permission denied"))
             if pd:
-                out.append(("ERROR", f"{fs.name}: {pd} x Permission denied reading source attrs (err=13) -"
+                out.append(("ERROR", f"{fs.tag}: {pd} x Permission denied reading source attrs (err=13) -"
                                      f" check export permissions / root squash for the assimilation host"))
             ed = sum(c for (sev, t), c in fs.types.items() if t == "Error importing directory contents")
             if ed:
-                out.append(("ERROR", f"{fs.name}: {ed} directories reported 'Error importing directory contents'"
+                out.append(("ERROR", f"{fs.tag}: {ed} directories reported 'Error importing directory contents'"
                                      f" - their contents may be incomplete (see feed for paths)"))
             fi = fs.items or 1
             if fs.sids and fs.items >= 10:
@@ -990,7 +1040,7 @@ class Engine:
                 pct = min(100, c * 100 // fi)
                 if pct >= 5:
                     full = self.sid_perm.get((sid, "0x1f01ff"), 0)
-                    msg = (f"{fs.name}: SID {sid} unmapped on {c:,} entries (~{pct}% of items), ACE dropped"
+                    msg = (f"{fs.tag}: SID {sid} unmapped on {c:,} entries (~{pct}% of items), ACE dropped"
                            + (" (Full Control ACEs among them)" if full else "")
                            + " - add an ID mapping or these ACLs will not survive")
                     out.append(("ISSUE" if pct >= 25 else "WARN", msg))
@@ -998,15 +1048,15 @@ class Engine:
                 pct = fs.nobody * 100 // fi
                 if pct >= 5:
                     out.append(("ISSUE" if pct >= 25 else "WARN",
-                                f"{fs.name}: {fs.nobody:,} items (~{pct}%) now owned by uid 65534 (nobody)"))
+                                f"{fs.tag}: {fs.nobody:,} items (~{pct}%) now owned by uid 65534 (nobody)"))
             for reason, n in fs.skips.most_common():
                 if reason in ("file not seen on the SMB side", "existence denied by SMB server"):
-                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"
+                    out.append(("ISSUE", f"{fs.tag}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"
                                          f" (see 'What these errors mean')"))
                 else:
-                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"))
+                    out.append(("ISSUE", f"{fs.tag}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"))
             if fs.ads:
-                out.append(("WARN", f"{fs.name}: {fs.ads:,} file{'s' if fs.ads != 1 else ''} had alternate data streams that were NOT"
+                out.append(("WARN", f"{fs.tag}: {fs.ads:,} file{'s' if fs.ads != 1 else ''} had alternate data streams that were NOT"
                                     f" assimilated (macOS resource forks / Windows ADS lost)"))
         unk = sum(c for (sev, t), c in self.types.items() if sev == "NOTE")
         if unk:
@@ -1244,7 +1294,7 @@ class Keys:
 # Dashboard
 # ---------------------------------------------------------------------------
 def fmt_dur(sec):
-    if sec is None:
+    if sec is None or sec < 0:
         return "-"
     sec = int(sec)
     h, r = divmod(sec, 3600)
@@ -1309,7 +1359,7 @@ class Dashboard:
         L.append(f"{WHITE}FILES{RESET}")
         if not e.files and getattr(self, "waiting", None):
             L.append(f"  {YELLOW}{self.waiting}{RESET}")
-        L.append(f"{GRAY}  {'status':10s} {'file':34s} {'items':>10s} {'issues':>7s} {'errors':>7s} "
+        L.append(f"{GRAY}  {'status':10s} {'share':>6s} {'file':34s} {'items':>10s} {'issues':>7s} {'errors':>7s} "
                  f"{'warns':>9s} {'elapsed':>8s}  last log time{RESET}")
         stc = {"COMPLETE": GREEN, "MOVED": GREEN, "ACTIVE": CYAN, "STALLED": RED, "INCOMPLETE": RED,
                "VANISHED": RED}
@@ -1319,7 +1369,7 @@ class Dashboard:
             st = f.status(self.live, self.stall)
             el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
             lt = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(f.last_ts)) if f.last_ts else "-"
-            L.append(f"  {stc.get(st, '')}{st:10s}{RESET} {f.name:34s} {f.items:>10,} "
+            L.append(f"  {stc.get(st, '')}{st:10s}{RESET} {BOLD}{(f.share or '?'):>6s}{RESET} {f.name:34s} {f.items:>10,} "
                      f"{(YELLOW if f.issues else '')}{f.issues:>7,}{RESET} {(RED if f.errors else '')}{f.errors:>7,}{RESET} "
                      f"{f.warns:>9,} {fmt_dur(el):>8s}  {lt}")
         if len(e.files) > max_files:
@@ -1333,7 +1383,7 @@ class Dashboard:
             L.append(f"{GRAY}  (nothing yet){RESET}")
         for (sev, t), c in items[:max_types]:
             nf = len(e.type_files[(sev, t)])
-            L.append(f"  {SEV_COLOR[sev]}{sev:5s}{RESET} {c:>11,}  {t}  {GRAY}({nf} file{'s' if nf != 1 else ''}){RESET}")
+            L.append(f"  {SEV_COLOR[sev]}{sev:5s}{RESET} {c:>11,}  {t}  {GRAY}({e.shares_for((sev, t))}){RESET}")
         if len(items) > max_types:
             L.append(f"{GRAY}  … {len(items) - max_types} more types (full list in final summary){RESET}")
 
@@ -1374,8 +1424,11 @@ class Dashboard:
                 want.append(ent)
                 if len(want) >= room:
                     break
-            for tstr, fname, sev, typ, path, text, labels, ln, _ in reversed(want):
-                L.append(f"  {GRAY}{tstr[5:]}{RESET} {SEV_COLOR[sev]}{sev:5s}{RESET} {GRAY}{fname[:22]}{RESET} "
+            for tstr, fname, sev, typ, path, text, labels, ln, fpath in reversed(want):
+                fobj = e.by_path.get(fpath)
+                sh = (fobj.share if fobj else None) or "?"
+                L.append(f"  {GRAY}{tstr[5:]}{RESET} {SEV_COLOR[sev]}{sev:5s}{RESET} {BOLD}{'share ' + sh:>10s}{RESET} "
+                         f"{GRAY}{fname[:18]}{RESET} "
                          f"{typ[:38]} {WHITE}{path}{RESET}")
         out = "\033[H" + "".join(fit(l, cols) + "\033[K\n" for l in L[:rows - 1]) + "\033[J"
         sys.stdout.write(out)
@@ -1471,7 +1524,7 @@ def summary_text(engine, live, stall, color=True):
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
         imp = ", ".join(f"{k}={v:,}" for k, v in f.imported.most_common())
-        out.append(f"\n{c(WHITE)}{f.path}{R}")
+        out.append(f"\n{c(WHITE)}{f.path}{R}  [{f.share_label}" + (f", obsid {f.obsid}" if f.obsid else "") + "]")
         out.append(f"  status={f.status(live, stall)}  items={f.items:,}  issues={f.issues:,}  errors={f.errors:,}"
                    f"  warnings={f.warns:,}  elapsed={fmt_dur(el)}")
         out.append(f"  imported by type: {imp or '-'}")
@@ -1479,7 +1532,7 @@ def summary_text(engine, live, stall, color=True):
             out.append(f"    {c(SEV_COLOR[sev])}{sev:5s}{R} {n:>11,}  {t}")
     out.append(f"\n{c(WHITE)}COUNT BY TYPE (all files){R}")
     for (sev, t), n in sorted(engine.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1])):
-        out.append(f"  {c(SEV_COLOR[sev])}{sev:5s}{R} {n:>11,}  {t}  ({len(engine.type_files[(sev, t)])} files)")
+        out.append(f"  {c(SEV_COLOR[sev])}{sev:5s}{R} {n:>11,}  {t}  ({engine.shares_for((sev, t))})")
     if engine.watches:
         out.append(f"\n{c(WHITE)}WATCH ITEMS{R}")
         for w in engine.watches:
@@ -1494,7 +1547,7 @@ def summary_text(engine, live, stall, color=True):
         width = max(60, min(110, shutil.get_terminal_size((100, 40)).columns - 2))
         out.append(f"\n{c(WHITE)}WHAT THESE ERRORS MEAN{R}")
         for sev, t, n, nf, e, sids in ex:
-            out.append(f"\n  {c(SEV_COLOR[sev])}{sev:5s}{R} {c(BOLD)}{t}{R}  ({n:,} in {nf} file{'s' if nf != 1 else ''})")
+            out.append(f"\n  {c(SEV_COLOR[sev])}{sev:5s}{R} {c(BOLD)}{t}{R}  ({n:,} in {engine.shares_for((sev, t))})")
             for i, para in enumerate(e["text"]):
                 if i:
                     out.append("")
@@ -1532,17 +1585,17 @@ def summary_markdown(engine, live, stall, args=None):
     out += ["## Highlights", ""]
     out += [f"- **{sev}** {_md(t)}" for sev, t in hl] if hl else ["No problems highlighted."]
     out += ["", "## Files", "",
-            "| Status | File | Items | Issues | Errors | Warnings | Elapsed |",
-            "|---|---|--:|--:|--:|--:|--:|"]
+            "| Status | Share | File | Items | Issues | Errors | Warnings | Elapsed |",
+            "|---|--:|---|--:|--:|--:|--:|--:|"]
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
-        out.append(f"| {f.status(live, stall)} | `{_md(f.path)}` | {f.items:,} | {f.issues:,} | {f.errors:,} "
+        out.append(f"| {f.status(live, stall)} | {f.share or '?'} | `{_md(f.path)}` | {f.items:,} | {f.issues:,} | {f.errors:,} "
                    f"| {f.warns:,} | {fmt_dur(el)} |")
     out += ["", "## Count by type (all files)", ""]
     if engine.types:
-        out += ["| Severity | Count | Type | Files |", "|---|--:|---|--:|"]
+        out += ["| Severity | Count | Type | Source |", "|---|--:|---|---|"]
         for (sev, t), n in sorted(engine.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1])):
-            out.append(f"| {sevs[sev]} | {n:,} | {_md(t)} | {len(engine.type_files[(sev, t)])} |")
+            out.append(f"| {sevs[sev]} | {n:,} | {_md(t)} | {engine.shares_for((sev, t))} |")
     else:
         out.append("No errors, issues or warnings.")
     if engine.watches:
@@ -1555,7 +1608,7 @@ def summary_markdown(engine, live, stall, args=None):
     if ex:
         out += ["", "## What these errors mean", ""]
         for sev, t, n, nf, e, sids in ex:
-            out += [f"### {sevs[sev]} — {_md(t)}", "", f"*{n:,} in {nf} file{'s' if nf != 1 else ''}*", ""]
+            out += [f"### {sevs[sev]} — {_md(t)}", "", f"*{n:,} in {engine.shares_for((sev, t))}*", ""]
             for para in e["text"]:
                 out += [para, ""]
             if e.get("ad"):
@@ -1565,7 +1618,7 @@ def summary_markdown(engine, live, stall, args=None):
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
         imp = ", ".join(f"{k}={v:,}" for k, v in f.imported.most_common())
-        out += [f"### `{_md(f.path)}`", "",
+        out += [f"### {f.share_label.capitalize()}" + (f" (obsid {f.obsid})" if f.obsid else "") + f": `{_md(f.path)}`", "",
                 f"- Status: **{f.status(live, stall)}**, elapsed {fmt_dur(el)}",
                 f"- Items {f.items:,} · issues {f.issues:,} · errors {f.errors:,} · warnings {f.warns:,}",
                 f"- Imported by type: {imp or '-'}", ""]
@@ -1712,6 +1765,7 @@ def finish(engine, args, live):
     txt = summary_text(engine, live, args.stall_secs, color=USE_COLOR)
     print(txt)
     if args.report:
+        os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
         with open(args.report, "w", encoding="utf-8") as f:
             if args.save:
                 f.write(f"# {__fullname__}\n# Capture v{__version__}\n# Host:    {HOST}\n"
@@ -1760,8 +1814,8 @@ def unknown_text(engine, live):
     for t, u in engine.unknown.items():
         out.append("")
         out.append(f"== {t}   ({u['count']:,} occurrence{'s' if u['count'] != 1 else ''})")
-        for path, ln, lines, idx in u["examples"]:
-            out.append(f"-- {path} : line {ln}" + (f"  (unrecognised: line {ln + idx})" if idx else ""))
+        for path, ln, lines, idx, sh in u["examples"]:
+            out.append(f"-- {sh}  {path} : line {ln}" + (f"  (unrecognised: line {ln + idx})" if idx else ""))
             out.extend(lines)
     return "\n".join(out) + "\n"
 
@@ -1786,7 +1840,7 @@ def _offer_unknown(engine, args, live):
     print(f"{MAGENTA}Found {total:,} log entr{'y' if total == 1 else 'ies'} ({len(engine.unknown)} kind"
           f"{'s' if len(engine.unknown) != 1 else ''}) that C.A.T.A.L.Y.S.T. doesn't recognise:{RESET}")
     for t, u in list(engine.unknown.items())[:10]:
-        p, ln, lines, idx = u["examples"][0]
+        p, ln, lines, idx, sh = u["examples"][0]
         print(f"  {u['count']:>7,}  {t}")
         print(f"           {GRAY}{lines[idx].strip()[:150]}{RESET}")
     if len(engine.unknown) > 10:
