@@ -42,10 +42,16 @@ Notes for Windows:
 
 | Assimilation | Log location | Who can access it |
 |---|---|---|
-| **Completed** | `<share>/assimilation-logs/` (the `assimilation-logs` folder at the root of each Hammerspace share) | **End users** |
+| **Completed** | `<share>/assimilation-logs/<date-time stamp>/` (a folder for the day the assimilation ran, inside the `assimilation-logs` folder at the root of each Hammerspace share) | **End users** |
 | **Running** | `/pd/assimilation-logs/<date-time stamp>/HS_root.log` on the Anvil | **Hammerspace support only** |
 
-**End users:** point the tool at the share, or at its `assimilation-logs` folder. Use `replay` to analyze completed logs, or live mode to watch for new logs as assimilations finish. Folders are searched recursively, so giving the share root finds `assimilation-logs` automatically.
+**End users:** completed logs are in a folder for the day the assimilation ran, for example:
+
+```
+/mnt/finance/assimilation-logs/<date-time stamp>/COM.X_1724094740_HS_root.log
+```
+
+Point the tool at the share, or at its `assimilation-logs` folder. Use `replay` to analyze completed logs, or live mode to watch for new logs as assimilations finish. Folders are searched recursively, so giving the share root finds `assimilation-logs` and every dated folder in it automatically.
 
 **Hammerspace support (on the Anvil):** live mode watches `/pd/assimilation-logs` by default and picks up new runs as they start. When an assimilation finishes, Hammerspace moves its log to the share's `assimilation-logs` folder. On Linux the tool keeps each log open, so it still reads the final lines after the move.
 
@@ -66,7 +72,7 @@ The `-d` option, or the **Monitor** prompt, accepts any of these. Folders are al
 |---|---|
 | Nothing (default) | `/pd/assimilation-logs` (Hammerspace support, on the Anvil) |
 | A share, or its `assimilation-logs` folder | `-d /mnt/finance` or `-d /mnt/finance/assimilation-logs` |
-| A log file | `-d /mnt/finance/assimilation-logs/COM.X_1724094740_HS_root.log` |
+| A log file | `-d /mnt/finance/assimilation-logs/<date-time stamp>/COM.X_1724094740_HS_root.log` |
 | A file name, or part of one | `-d HS_root.log`, `-d ONCOR` |
 | A folder plus a name | `-d /mnt/finance/ONCOR` |
 
@@ -268,6 +274,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.5.1 | Completed logs shown in their dated folder: `<share>/assimilation-logs/<date-time stamp>/<log>`. |
 | 2.5.0 | Notes that monitoring running assimilations requires Hammerspace support, and that end users examine completed logs in `<share>/assimilation-logs/`. Corrected where finished logs are moved to. |
 | 2.4.9 | Windows support (console colors and fallback, safe file handling, no crashes on unsupported characters). Linux remains the primary platform. |
 | 2.4.8 | `-O` / `--output-dir` (or `CATALYST_OUT`) sets where all output goes; default `/tmp`. Exports default to it. |

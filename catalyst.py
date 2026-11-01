@@ -7,7 +7,7 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.5.0
+  Version  : 2.5.1
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Platform : Linux - the Hammerspace Anvil is Linux-based, and that is where
@@ -19,6 +19,8 @@ Hammerspace C.A.T.A.L.Y.S.T.
              HTTP upload)
 
   Changelog
+    2.5.1  2026-10-31  Completed logs are shown in their dated folder:
+                       <share>/assimilation-logs/<date-time stamp>/<log>.
     2.5.0  2026-10-31  States that monitoring a running assimilation needs
                        Hammerspace support (logs underway are only on the
                        Anvil), and that end users examine completed logs in
@@ -87,11 +89,15 @@ Live monitor and replay tool for Hammerspace assimilation logs.
 
 Where the logs are:
   Completed assimilations (end users):
-      <share>/assimilation-logs/
+      <share>/assimilation-logs/<date-time stamp>/<log file>
+      e.g. /mnt/finance/assimilation-logs/<date-time stamp>/COM.X_1724094740_HS_root.log
   Every Hammerspace share has an assimilation-logs folder at its root holding
-  the logs of assimilations into that share once they have finished. This is
-  what end users can examine: point the tool at the share (or that folder)
-  and use replay, or live mode to watch for new logs arriving there.
+  the logs of assimilations into that share once they have finished, in a
+  folder for the day (date-time stamp) the assimilation ran. This is what end
+  users can examine: point the tool at the share (or its assimilation-logs
+  folder) and use replay, or live mode to watch for new logs arriving there.
+  Folders are searched recursively, so the dated folders are found
+  automatically.
 
   Assimilations that are running (Hammerspace support only):
       /pd/assimilation-logs/<date-time stamp>/HS_root.log   (on the Anvil)
@@ -103,7 +109,7 @@ Where the logs are:
 
   Folders are always searched recursively. You can give:
       a folder      e.g. /mnt/finance  or  /mnt/finance/assimilation-logs
-      a log file    e.g. /mnt/finance/assimilation-logs/COM.X_1724094740_HS_root.log
+      a log file    e.g. /mnt/finance/assimilation-logs/<date-time stamp>/COM.X_1724094740_HS_root.log
       a file name   e.g. HS_root.log, or part of one such as ONCOR; searched
                     for under the default folder (or the folder in front of
                     it, e.g. /mnt/finance/ONCOR)
@@ -134,14 +140,14 @@ import time
 # Defaults you may want to edit
 # ---------------------------------------------------------------------------
 DEFAULT_LIVE_DIR = os.environ.get("CATALYST_DIR", "/pd/assimilation-logs")
-# Matches the running log (HS_root.log) and completed logs in <share>/assimilation-logs/
+# Matches the running log (HS_root.log) and completed logs in <share>/assimilation-logs/<date-time stamp>/
 DEFAULT_FILE_GLOB = os.environ.get("CATALYST_GLOB", "*HS_root.log")
 CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -1639,7 +1645,8 @@ def ask(prompt, default):
 SUPPORT_NOTE = (
     "Monitoring an assimilation while it is running requires Hammerspace support: its log is only on the Anvil\n"
     f"({DEFAULT_LIVE_DIR}/<date-time>/HS_root.log), which end users cannot access. End users can examine logs of\n"
-    "completed assimilations in the assimilation-logs folder at the root of each Hammerspace share.")
+    "completed assimilations in the assimilation-logs folder at the root of each Hammerspace share\n"
+    "(<share>/assimilation-logs/<date-time stamp>/), which this tool searches recursively.")
 
 
 def _ino(p):
@@ -1786,8 +1793,8 @@ def run_replay(args, cfg):
     target = args.dir or cfg.get("replay_dir") or os.getcwd()
     while True:
         if not args.no_prompt and not args.dir:
-            print(f"{GRAY}Completed assimilation logs are in the assimilation-logs folder at the root of each{RESET}")
-            print(f"{GRAY}Hammerspace share. Give the share, that folder, a log file, or a file name.{RESET}")
+            print(f"{GRAY}Completed assimilation logs are in <share>/assimilation-logs/<date-time stamp>/ on each{RESET}")
+            print(f"{GRAY}Hammerspace share. Give the share, its assimilation-logs folder, a log file, or a file name.{RESET}")
             target = ask(f"{WHITE}Replay{RESET} (folders are searched recursively)", target)
         root, pattern, desc = resolve_target(target, args.glob, [os.getcwd(), DEFAULT_LIVE_DIR])
         if os.path.isdir(root) and not args.glob_given and not args.no_prompt and pattern == args.glob \
