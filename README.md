@@ -8,6 +8,7 @@ Live monitor and replay tool for Hammerspace assimilation logs (`HS_root.log`). 
 - Python 3.7+, standard library only (nothing to install)
 - Runs on **Linux**, the primary platform: the Hammerspace Anvil is Linux-based, and live monitoring of `/pd/assimilation-logs` happens there. Also runs on Windows 10/11 and macOS (see [Platforms](#platforms))
 - Full guide: [`docs/Hammerspace_CATALYST.docx`](docs/Hammerspace_CATALYST.docx) (also importable into Confluence)
+- Confluence copy of this README: [`docs/README_confluence.docx`](docs/README_confluence.docx) (Import → Word document) or [`docs/README_confluence.md`](docs/README_confluence.md) (Insert → Markup → Markdown)
 
 > [!IMPORTANT]
 > **Running assimilations require Hammerspace support.** While an assimilation is underway, its log is only on the Anvil (`/pd/assimilation-logs`), which end users can't access. **End users can examine logs of completed assimilations**, which are stored in the `assimilation-logs` folder at the root of each Hammerspace share.
