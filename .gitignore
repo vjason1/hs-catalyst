@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.DS_Store
+._*
+*.log
+catalyst_*_report.txt
+catalyst_*_matches.csv
+catalyst_bundle_*.tar.gz
