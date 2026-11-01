@@ -239,6 +239,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.4.7 | Banner now spells CATALYST. Startup hint split over two lines. |
 | 2.4.6 | Summary, report, and Markdown export explain each error type found, with next steps and pre-filled PowerShell AD lookups for unmapped SIDs. |
 | 2.4.5 | On exit, offers to export a Markdown summary report and the full log of every error/issue (`-x DIR` to export without asking). Exports are included in the upload. |
 | 2.4.4 | Log entries the tool doesn't recognise are kept with the lines of each entry. On exit you're offered to upload them (default No); otherwise you're asked to email them. |

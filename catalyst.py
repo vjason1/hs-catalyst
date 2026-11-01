@@ -7,13 +7,15 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.6
+  Version  : 2.4.7
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Requires : Python 3.7+ (standard library only; uses curl for upload when
              present, otherwise a built-in HTTP upload)
 
   Changelog
+    2.4.7  2026-10-31  Banner now spells CATALYST (was CATAUYSTT). Startup
+                       hint split over two lines so it isn't cut off.
     2.4.6  2026-10-31  Exit summary, saved report and Markdown export gain a
                        "What these errors mean" section: an explanation and
                        next steps for each error type found, with PowerShell
@@ -107,7 +109,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.6"
+__version__ = "2.4.7"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -152,11 +154,11 @@ SEV_COLOR = {"ERROR": RED, "ISSUE": YELLOW, "WARN": CYAN, "NOTE": MAGENTA, "INFO
 SEV_RANK = {"ERROR": 0, "ISSUE": 1, "NOTE": 2, "WARN": 3, "INFO": 4}
 
 BANNER_ART = r"""
-  ____    _  _____    _    _   ___   ______   _____ _____ 
- / ___|  / \|_   _|  / \  | | | \ \ / / ___| |_   _|_   _|
-| |     / _ \ | |   / _ \ | | | |\ V /\___ \   | |   | |  
-| |___ / ___ \| |  / ___ \| |_| | | |  ___) |  | |   | |  
- \____/_/   \_\_| /_/   \_\\___/|_| |_| |____/   |_|   |_|  """
+  ____    _  _____  _    _  __   ______ _____
+ / ___|  / \|_   _|/ \  | | \ \ / / ___|_   _|
+| |     / _ \ | | / _ \ | |  \ V /\___ \ | |
+| |___ / ___ \| |/ ___ \| |___| |  ___) || |
+ \____/_/   \_\_/_/   \_\_____|_| |____/ |_|"""
 
 
 def print_banner(status="Assimilation & Analysis Engine Active"):
@@ -1560,8 +1562,8 @@ def run_live(args, cfg):
     target = args.dir or DEFAULT_LIVE_DIR
     while True:
         if not args.no_prompt and not args.dir:
-            print(f"{GRAY}Running assimilations log to {DEFAULT_LIVE_DIR}/<date-time>/HS_root.log on the Anvil."
-                  f" Enter that, another folder (searched recursively), a log file, or a log file name.{RESET}")
+            print(f"{GRAY}Running assimilations log to {DEFAULT_LIVE_DIR}/<date-time>/HS_root.log on the Anvil.{RESET}")
+            print(f"{GRAY}Press Enter for that, or give a folder (searched recursively), a log file, or a file name.{RESET}")
             target = ask(f"{WHITE}Monitor{RESET}", target)
         root, pattern, desc = resolve_target(target, args.glob, [DEFAULT_LIVE_DIR, os.getcwd()])
         if os.path.isdir(root) and not args.glob_given and not args.no_prompt and pattern == args.glob \
