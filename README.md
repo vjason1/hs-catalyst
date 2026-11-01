@@ -90,9 +90,17 @@ Skipped lines are counted by reason (for example *Skipped - file not seen on the
 | `+` / `-` | Replay speed |
 | `s` | Replay: skip to the next entry |
 
+## Output directory
+
+Everything the tool writes goes to one folder: reports, CSV, Markdown exports, the error log, the unrecognised-entry file, and upload bundles. The default is `/tmp`. Change it with `-O DIR` / `--output-dir DIR`, or set `CATALYST_OUT`. The folder is created if it doesn't exist. The path is shown at startup.
+
+```bash
+python3 catalyst.py -O ~/catalyst-reports -x     # export into ~/catalyst-reports on exit
+```
+
 ## Saving and uploading
 
-- `-o` saves the summary and all matched lines to `/tmp/catalyst_<host>_<timestamp>_report.txt` and `_matches.csv`. When you stop, it asks whether to upload them.
+- `-o` saves the summary and all matched lines to `<output dir>/catalyst_<host>_<timestamp>_report.txt` and `_matches.csv`. When you stop, it asks whether to upload them.
 - `-u` saves, and uploads when stopped without asking.
 
 The upload bundles both files as a `.tar.gz` and POSTs them to the Hammerspace endpoint the same way as `dme-watch.sh`. It uses `curl` if installed, or a built-in HTTP upload otherwise. Override the endpoint with `--upload-url` or `CATALYST_UPLOAD_URL`.
@@ -191,26 +199,26 @@ When you quit, the summary is printed on screen and you're asked:
 Export a Markdown summary report and the full log of all N errors/issues? (y/N)
 ```
 
-If you answer **y**, it asks for a folder (default: the current folder) and writes:
+If you answer **y**, it asks for a folder (default: the output directory, `/tmp` unless changed with `-O`) and writes:
 
 | File | Contents |
 |---|---|
 | `catalyst_<host>_<timestamp>_summary.md` | The exit summary in Markdown: highlights, files, count by type, watch items, top unmapped SIDs, per-file breakdown, and any log entries not recognised |
 | `catalyst_<host>_<timestamp>_errors.log` | Every ERROR, ISSUE and NOTE line found, each with log time, severity, type, log file and line number, affected path, and the original log line. Warnings are counted in the summary but not listed, since logs can have millions of them. |
 
-Use `-x [DIR]` to export without being asked (default folder: the current one). If you're also saving with `-o` / `-u`, the exported files are included in the upload bundle.
+Use `-x [DIR]` to export without being asked (default folder: the output directory). If you're also saving with `-o` / `-u`, the exported files are included in the upload bundle.
 
 ## Log entries the tool doesn't recognise
 
 If a log contains an entry C.A.T.A.L.Y.S.T. doesn't recognise, it appears in the feed as a NOTE and in the highlights. Each one is kept with every line of its log entry (the timestamp line plus its indented detail lines). Up to 3 examples of each kind are kept.
 
-When you quit, the tool lists these entries, saves them to `/tmp/catalyst_<host>_<timestamp>_unknown.txt`, and asks:
+When you quit, the tool lists these entries, saves them to `<output dir>/catalyst_<host>_<timestamp>_unknown.txt`, and asks:
 
 ```
 Send these entries to Hammerspace so the tool can learn them? (y/N)
 ```
 
-- **y**: the file is bundled as `/tmp/catalyst_unknown_<host>_<timestamp>.tar.gz` and uploaded the same way as other captures.
+- **y**: the file is bundled as `<output dir>/catalyst_unknown_<host>_<timestamp>.tar.gz` and uploaded the same way as other captures.
 - **N** (the default), or no terminal: you're asked to email the log entry text to **jason.ventresco@hammerspace.com**, and given the file to copy or attach.
 
 ## Examples
@@ -232,6 +240,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 |---|---|
 | `CATALYST_DIR` | Default folder (default `/pd/assimilation-logs`) |
 | `CATALYST_GLOB` | Default file name pattern (default `*HS_root.log`) |
+| `CATALYST_OUT` | Output directory (default `/tmp`) |
 | `CATALYST_UPLOAD_URL` | Upload endpoint |
 | `NO_COLOR` | Turn colors off |
 
@@ -239,6 +248,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.4.8 | `-O` / `--output-dir` (or `CATALYST_OUT`) sets where all output goes; default `/tmp`. Exports default to it. |
 | 2.4.7 | Banner now spells CATALYST. Startup hint split over two lines. |
 | 2.4.6 | Summary, report, and Markdown export explain each error type found, with next steps and pre-filled PowerShell AD lookups for unmapped SIDs. |
 | 2.4.5 | On exit, offers to export a Markdown summary report and the full log of every error/issue (`-x DIR` to export without asking). Exports are included in the upload. |

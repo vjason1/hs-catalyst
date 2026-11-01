@@ -7,13 +7,16 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.7
+  Version  : 2.4.8
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Requires : Python 3.7+ (standard library only; uses curl for upload when
              present, otherwise a built-in HTTP upload)
 
   Changelog
+    2.4.8  2026-10-31  -O / --output-dir (or CATALYST_OUT) sets where all
+                       output goes; default /tmp. Exports now default to the
+                       output dir instead of the current folder.
     2.4.7  2026-10-31  Banner now spells CATALYST (was CATAUYSTT). Startup
                        hint split over two lines so it isn't cut off.
     2.4.6  2026-10-31  Exit summary, saved report and Markdown export gain a
@@ -109,7 +112,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.7"
+__version__ = "2.4.8"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -123,7 +126,10 @@ UNKNOWN_MAX_EXAMPLES = 3     # examples kept per type
 UNKNOWN_MAX_LINES = 50       # lines kept per example entry
 HOST = __import__("socket").gethostname().split(".")[0] or "host"
 RUN_STAMP = time.strftime("%Y-%m-%d_%H%M%S")
-SAVE_DIR = "/tmp" if os.path.isdir("/tmp") else __import__("tempfile").gettempdir()
+# Where everything the tool writes goes (reports, CSV, exports, bundles). Change with -O / --output-dir.
+DEFAULT_OUTPUT_DIR = os.environ.get("CATALYST_OUT") or (
+    "/tmp" if os.path.isdir("/tmp") else __import__("tempfile").gettempdir())
+SAVE_DIR = DEFAULT_OUTPUT_DIR
 
 # ---------------------------------------------------------------------------
 # Terminal colours
@@ -1332,12 +1338,14 @@ def _export(engine, args, live):
     """Offer (or, with -x, just do) export of the Markdown summary + full error log."""
     tmp = engine.errlog_path
     target = args.export
+    if target == "":  # -x with no folder: use the output directory
+        target = SAVE_DIR
     if target is None and sys.stdin.isatty() and not args.no_prompt:
         print("-" * 69)
         a = ask(f"Export a Markdown summary report and the full log of all {engine.errlog_count:,} errors/issues?"
                 f" (y/N)", "n")
         if a.lower().startswith("y"):
-            target = ask("Folder to write them to", os.getcwd())
+            target = ask("Folder to write them to", SAVE_DIR)
     if not target:
         if tmp and os.path.exists(tmp):
             os.remove(tmp)
@@ -1603,6 +1611,7 @@ def run_live(args, cfg):
         except OSError:
             pass
     print(f"Monitoring {desc}")
+    print(f"Output directory: {SAVE_DIR}")
     if files:
         print(f"Found {len(files)} log(s). Checking for new ones every {args.rescan:g}s…")
     else:
@@ -1725,6 +1734,8 @@ def run_replay(args, cfg):
     save_config(cfg)
     args.source_root = ", ".join(files)
     setup_save(args)
+    if not args.plain:
+        print(f"Output directory: {SAVE_DIR}")
 
     engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain,
                     errlog=errlog_temp_path())
@@ -1878,11 +1889,14 @@ def main(argv=None):
     ap.add_argument("--plain", action="store_true", help="no dashboard; print matching lines like grep, summary at end")
     ap.add_argument("--report", help="write the final summary to this text file")
     ap.add_argument("--matches-csv", help="write every matched line to this CSV")
-    ap.add_argument("-x", "--export", nargs="?", const=".", metavar="DIR",
-                    help="on exit, write a Markdown summary + full error log to DIR (default: current folder)"
+    ap.add_argument("-O", "--output-dir", metavar="DIR", default=DEFAULT_OUTPUT_DIR,
+                    help=f"where reports, CSV, exports and upload bundles are written (default {DEFAULT_OUTPUT_DIR};"
+                         f" env CATALYST_OUT)")
+    ap.add_argument("-x", "--export", nargs="?", const="", metavar="DIR",
+                    help="on exit, write a Markdown summary + full error log to DIR (default: the output dir)"
                          " without asking")
     ap.add_argument("-o", "--save", action="store_true",
-                    help=f"save captured errors + summary to {SAVE_DIR}/catalyst_<host>_<timestamp>_*")
+                    help="save captured errors + summary to <output dir>/catalyst_<host>_<timestamp>_*")
     ap.add_argument("-u", "--upload", action="store_true",
                     help="save, and upload to Hammerspace when stopped without asking (implies -o)")
     ap.add_argument("--upload-url", default=UPLOAD_URL, help=f"upload endpoint (default {UPLOAD_URL})")
@@ -1890,6 +1904,15 @@ def main(argv=None):
     ap.add_argument("-v", "--version", action="version", version=f"{__fullname__}\nv{__version__}")
     args = ap.parse_args(argv)
     args.glob_given = args.glob is not None
+    global SAVE_DIR
+    out = os.path.abspath(os.path.expanduser(args.output_dir))
+    try:
+        os.makedirs(out, exist_ok=True)
+    except OSError as e:
+        ap.error(f"can't create output directory {out}: {e}")
+    if not os.access(out, os.W_OK):
+        ap.error(f"output directory {out} is not writable")
+    SAVE_DIR = out
     if args.upload:
         args.save = True
     args.source_root = args.dir or ""
