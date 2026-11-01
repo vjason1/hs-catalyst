@@ -6,7 +6,7 @@ Live monitor and replay tool for Hammerspace assimilation logs (`HS_root.log`). 
 
 - Single file: [`catalyst.py`](catalyst.py)
 - Python 3.7+, standard library only (nothing to install)
-- Runs on a Hammerspace Anvil, Linux, or macOS
+- Runs on **Linux**, the primary platform: the Hammerspace Anvil is Linux-based, and live monitoring of `/pd/assimilation-logs` happens there. Also runs on Windows 10/11 and macOS (see [Platforms](#platforms))
 - Full guide: [`docs/Hammerspace_CATALYST.docx`](docs/Hammerspace_CATALYST.docx) (also importable into Confluence)
 
 ## Quick start
@@ -18,6 +18,21 @@ python3 catalyst.py -h           # all options
 ```
 
 Press **Enter** at the prompts to accept the defaults, then **q** to stop and see the summary.
+
+## Platforms
+
+| Platform | Use | How to run |
+|---|---|---|
+| **Linux / Hammerspace Anvil** (primary) | Live monitoring of running assimilations, replay | `python3 catalyst.py` |
+| Windows 10/11 | Replay, or monitoring logs copied off the Anvil or on a share | `py catalyst.py` (or `python catalyst.py`) |
+| macOS | Replay, or monitoring copied logs | `python3 catalyst.py` |
+
+Notes for Windows:
+
+- Use Windows Terminal or the Windows 10/11 console for the full-screen dashboard. Older consoles automatically fall back to plain output.
+- Output goes to `%TEMP%` by default; change it with `-O`.
+- Logs aren't held open between reads, so the program writing a log can still move or rename it.
+- Upload uses the `curl.exe` included with Windows 10/11.
 
 ## Where the logs are
 
@@ -248,6 +263,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.4.9 | Windows support (console colors and fallback, safe file handling, no crashes on unsupported characters). Linux remains the primary platform. |
 | 2.4.8 | `-O` / `--output-dir` (or `CATALYST_OUT`) sets where all output goes; default `/tmp`. Exports default to it. |
 | 2.4.7 | Banner now spells CATALYST. Startup hint split over two lines. |
 | 2.4.6 | Summary, report, and Markdown export explain each error type found, with next steps and pre-filled PowerShell AD lookups for unmapped SIDs. |

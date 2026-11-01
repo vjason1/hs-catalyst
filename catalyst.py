@@ -7,13 +7,24 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.8
+  Version  : 2.4.9
   Author   : Jason Ventresco
   Created  : 2026-10-29
+  Platform : Linux - the Hammerspace Anvil is Linux-based, and that is where
+             live monitoring of /pd/assimilation-logs happens. Also runs on
+             Windows 10/11 and macOS (replay, or monitoring logs copied off
+             the Anvil / on a share). On Windows run it with: py catalyst.py
   Requires : Python 3.7+ (standard library only; uses curl for upload when
-             present, otherwise a built-in HTTP upload)
+             present - Windows 10/11 include it - otherwise a built-in
+             HTTP upload)
 
   Changelog
+    2.4.9  2026-10-31  Windows support: logs aren't held open (so they can
+                       still be moved), unreliable Windows/SMB file ids are
+                       ignored, ANSI enabled via the console API with a plain
+                       fallback on old consoles, and output never crashes on
+                       characters the console can't show. Linux remains the
+                       primary platform (Hammerspace Anvil).
     2.4.8  2026-10-31  -O / --output-dir (or CATALYST_OUT) sets where all
                        output goes; default /tmp. Exports now default to the
                        output dir instead of the current folder.
@@ -112,7 +123,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.8"
+__version__ = "2.4.9"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -128,15 +139,40 @@ HOST = __import__("socket").gethostname().split(".")[0] or "host"
 RUN_STAMP = time.strftime("%Y-%m-%d_%H%M%S")
 # Where everything the tool writes goes (reports, CSV, exports, bundles). Change with -O / --output-dir.
 DEFAULT_OUTPUT_DIR = os.environ.get("CATALYST_OUT") or (
-    "/tmp" if os.path.isdir("/tmp") else __import__("tempfile").gettempdir())
+    "/tmp" if (os.name != "nt" and os.path.isdir("/tmp")) else __import__("tempfile").gettempdir())
 SAVE_DIR = DEFAULT_OUTPUT_DIR
 
 # ---------------------------------------------------------------------------
 # Terminal colours
 # ---------------------------------------------------------------------------
-USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
-if os.name == "nt":
-    os.system("")  # enables ANSI escape handling in Windows 10+ consoles
+WINDOWS = os.name == "nt"
+
+
+def _enable_windows_vt():
+    """Turn on ANSI escape handling in the Windows console (Windows 10+). False if unsupported."""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not k32.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k32.SetConsoleMode(h, mode.value | 0x0004))  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        return False
+
+
+# Never crash on characters the console/redirect encoding can't show (e.g. cp1252 on Windows).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+VT_OK = True
+if WINDOWS and sys.stdout.isatty():
+    VT_OK = _enable_windows_vt()   # older consoles: no colours, no full-screen dashboard
+USE_COLOR = sys.stdout.isatty() and VT_OK and not os.environ.get("NO_COLOR")
 
 
 def _c(code):
@@ -939,13 +975,26 @@ def resolve_target(text, pattern, bases):
     return root, pat, f"{root} (recursive, name {pat})"
 
 
+# On Linux/macOS each log is held open, so when Hammerspace moves a finished log into the destination
+# share we still read the last lines written before the move. Windows won't let another program move or
+# rename a file we hold open, so there we open, read and close on every pass instead.
+HOLD_OPEN = not WINDOWS
+
+
+def _same_file(a, b):
+    """Is inode a the same file as inode b? Windows/SMB file ids can be 0 or unstable, so don't trust them there."""
+    if WINDOWS or not a or not b:
+        return True
+    return a == b
+
+
 def _open_log(engine, fs):
     try:
         fs.fh = open(fs.path, "rb")
     except OSError:
         return False
     st = os.fstat(fs.fh.fileno())
-    if fs.ino is not None and st.st_ino != fs.ino:
+    if fs.ino is not None and not _same_file(st.st_ino, fs.ino):
         fs.offset, fs.partial = 0, b""  # a different file now lives at this path
     if st.st_size < fs.offset:
         fs.offset, fs.partial = 0, b""
@@ -954,45 +1003,55 @@ def _open_log(engine, fs):
     return True
 
 
-def read_new(engine, fs, budget):
-    """Read up to `budget` bytes of new data from fs; returns bytes consumed.
+def _log_gone(engine, fs, replaced):
+    """The path no longer holds the log we were reading: finish it off and report why."""
+    if fs.fh:
+        fs.fh.close()
+        fs.fh = None
+    if fs.partial:
+        engine.process_line(fs, fs.partial.decode("utf-8", "replace").rstrip("\r"))
+        fs.truncated_tail = not fs.completed
+        fs.partial = b""
+    if replaced:
+        fs.rotations += 1
+        engine.event("NOTE", "Log replaced at same path - reading new file", fs, fs.path)
+        fs.offset, fs.ino = 0, None
+        return
+    fs.gone = True
+    if fs.completed:
+        engine.event("NOTE", "Assimilation finished - log moved into destination share", fs, fs.path)
+    else:
+        engine.event("ERROR", "Log disappeared before 'Assimilation complete'", fs, fs.path)
 
-    The file handle is kept open, so when Hammerspace moves the finished log into the
-    destination share we still read whatever was written right before the move."""
+
+def read_new(engine, fs, budget):
+    """Read up to `budget` bytes of new data from fs; returns bytes consumed."""
     if fs.gone:
         return 0
     if fs.fh is None and not _open_log(engine, fs):
+        if fs.ino is not None and not os.path.exists(fs.path):  # we'd read it before; now it's gone
+            _log_gone(engine, fs, replaced=False)
         return 0
     try:
         pst = os.stat(fs.path)
-        same = pst.st_ino == fs.ino
+        same = _same_file(pst.st_ino, fs.ino)
     except OSError:
         pst, same = None, False
-    hst = os.fstat(fs.fh.fileno())
-    if hst.st_size < fs.offset:  # truncated in place
-        fs.rotations += 1
-        engine.event("NOTE", "Log truncated - re-reading from start", fs, fs.path)
-        fs.offset, fs.partial = 0, b""
-        fs.fh.seek(0)
-    data = fs.fh.read(budget)
-    if not data:
-        if not same:  # drained the old file and the path no longer points at it
+    try:
+        hst = os.fstat(fs.fh.fileno())
+        if hst.st_size < fs.offset:  # truncated in place
+            fs.rotations += 1
+            engine.event("NOTE", "Log truncated - re-reading from start", fs, fs.path)
+            fs.offset, fs.partial = 0, b""
+            fs.fh.seek(0)
+        data = fs.fh.read(budget)
+    finally:
+        if not HOLD_OPEN and fs.fh:
             fs.fh.close()
             fs.fh = None
-            if fs.partial:
-                engine.process_line(fs, fs.partial.decode("utf-8", "replace").rstrip("\r"))
-                fs.truncated_tail = not fs.completed
-                fs.partial = b""
-            if pst is None:
-                fs.gone = True
-                if fs.completed:
-                    engine.event("NOTE", "Assimilation finished - log moved into destination share", fs, fs.path)
-                else:
-                    engine.event("ERROR", "Log disappeared before 'Assimilation complete'", fs, fs.path)
-            else:
-                fs.rotations += 1
-                engine.event("NOTE", "Log replaced at same path - reading new file", fs, fs.path)
-                fs.offset, fs.ino = 0, None
+    if not data:
+        if not same:  # drained the old file and the path no longer points at it
+            _log_gone(engine, fs, replaced=pst is not None)
         return 0
     fs.offset += len(data)
     fs.last_growth = time.time()
@@ -1646,7 +1705,7 @@ def run_live(args, cfg):
                     last_scan = time.time()
                     for p in discover(root, pattern):
                         old = engine.by_path.get(p)
-                        if old is None or (old.gone and _ino(p) != old.ino):
+                        if old is None or (old.gone and (WINDOWS or _ino(p) != old.ino)):
                             fs = engine.add_file(p)
                             engine.event("NOTE", "New assimilation log detected", fs, p)
                 if dash and not dash.paused and time.time() - last_draw > args.refresh:
@@ -1917,7 +1976,7 @@ def main(argv=None):
         args.save = True
     args.source_root = args.dir or ""
     args.glob = args.glob or DEFAULT_FILE_GLOB
-    if not sys.stdout.isatty():
+    if not sys.stdout.isatty() or not VT_OK:
         args.plain = True
 
     if not args.no_banner:
