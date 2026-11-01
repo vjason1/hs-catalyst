@@ -97,6 +97,92 @@ Skipped lines are counted by reason (for example *Skipped - file not seen on the
 
 The upload bundles both files as a `.tar.gz` and POSTs them to the Hammerspace endpoint the same way as `dme-watch.sh`. It uses `curl` if installed, or a built-in HTTP upload otherwise. Override the endpoint with `--upload-url` or `CATALYST_UPLOAD_URL`.
 
+## What the errors mean
+
+The exit summary, saved report, and Markdown export include a **What these errors mean** section for each error type found. For SID errors, it adds PowerShell Active Directory lookups filled in with the most frequent domain SIDs from the log.
+
+<details><summary><b>Unmapped SID - ACE dropped</b></summary>
+
+A user/group SID could not be mapped to a current AD user/group, so that ACE was dropped. In most cases, it is because the user or group was deleted. To verify this, search AD with the PowerShell commands below.
+
+If the SID maps to a user/group, verify that it was not deleted. If not, verify that the cluster is joined to an Active Directory domain, is not having any issues communicating with Active Directory, and (if applicable) can query the target domain using a trust from the domain the cluster is joined to.
+
+```powershell
+Import-Module ActiveDirectory
+Get-ADUser -Identity <SID>
+Get-ADGroup -Identity <SID>
+```
+
+</details>
+
+<details><summary><b>No such file or directory (err=2) [nfs3_get_attr_by_readdir_file_id]</b></summary>
+
+Hammerspace was unable to read a file using the source NFS export. As a result, it was not assimilated. To resolve this issue, check the file on the source volume, and, if present and valid, copy it manually to Hammerspace. If a large number of files are impacted, then you may need to correct something on the source volume, and retry the assimilation into a new/empty destination.
+
+</details>
+
+<details><summary><b>Error importing directory contents</b></summary>
+
+Hammerspace experienced an unidentified error importing the contents of a directory using the source NFS export. Check that the directory can be read within the Hammerspace share, and that all the contents are present (if there were any on the source). If the directory is missing some or all of the contents, check it directly on the source volume, and, if unassimilated files are present, copy them manually to Hammerspace. If a large number of directories are impacted, then you may need to correct something on the source volume (possibly including SMB permissions), and retry the assimilation into a new/empty destination.
+
+</details>
+
+<details><summary><b>Issues during import (type=Regular)</b></summary>
+
+Hammerspace experienced an unidentified error importing a file using the source NFS export. Check that it can be read within the Hammerspace share, and that the contents are intact (if there were any on the source). If the file cannot be read, or is empty, check it directly on the source volume, and, if present, copy it manually to Hammerspace. If a large number of files are impacted, then you may need to correct something on the source volume (possibly including SMB permissions), and retry the assimilation into a new/empty destination.
+
+</details>
+
+<details><summary><b>Issues during import (type=Directory)</b></summary>
+
+Hammerspace experienced an unidentified error importing a directory using the source NFS export. Check that it can be read within the Hammerspace share, and that the contents are present (if there were any on the source). If the directory cannot be read, or is missing some or all of the contents, check it directly on the source volume, and, if present, copy it manually to Hammerspace. If a large number of directories are impacted, then you may need to correct something on the source volume (possibly including SMB permissions), and retry the assimilation into a new/empty destination.
+
+</details>
+
+<details><summary><b>Skipped - file not seen on the SMB side</b></summary>
+
+This usually indicates that Hammerspace can see the file fine from the source NFS export, but is denied when trying to import the ACEs using the source SMB share. As a result, this file is skipped. Check this file directly on the source, and, if present, copy it manually to Hammerspace. If a large number of files are impacted, then you may need to correct something on the source volume (such as granting the assimilation service account access to the denied files), and retry the assimilation into a new/empty destination.
+
+A less common reason for this error is that the file was deleted from the source before the SMB ACEs could be read.
+
+</details>
+
+<details><summary><b>Skipped - existence denied by SMB server</b></summary>
+
+Hammerspace can see the file fine from the NFS export, but cannot see it from the SMB share. As a result, this file is skipped. Check this file directly on the source, and, if present, copy it manually to Hammerspace. If a large number of files are impacted, then you may need to correct something on the source volume, and retry the assimilation into a new/empty destination.
+
+One possible reason for this error is that the file was deleted from the source before the SMB ACEs could be read.
+
+</details>
+
+<details><summary><b>Unmapped user SID - owner id fallback</b></summary>
+
+A user SID could not be mapped to a current AD user, so the owning user was set to the fallback (if specified in the assimilation options). In most cases, it is because the user was deleted. To verify this, search AD with the PowerShell commands below.
+
+```powershell
+Import-Module ActiveDirectory
+Get-ADUser -Identity <SID>
+```
+
+</details>
+
+<details><summary><b>Unmapped group SID - group id fallback</b></summary>
+
+A group SID could not be mapped to a current AD group, so the owning group was set to the fallback (if specified in the assimilation options). In most cases, it is because the group was deleted. To verify this, search AD with the PowerShell commands below.
+
+```powershell
+Import-Module ActiveDirectory
+Get-ADGroup -Identity <SID>
+```
+
+</details>
+
+<details><summary><b>Alternate data stream(s) not assimilated</b></summary>
+
+Hammerspace does not currently support alternate data streams, so these are not imported during the assimilation process. This is expected.
+
+</details>
+
 ## Exporting a report
 
 When you quit, the summary is printed on screen and you're asked:
@@ -153,6 +239,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.4.6 | Summary, report, and Markdown export explain each error type found, with next steps and pre-filled PowerShell AD lookups for unmapped SIDs. |
 | 2.4.5 | On exit, offers to export a Markdown summary report and the full log of every error/issue (`-x DIR` to export without asking). Exports are included in the upload. |
 | 2.4.4 | Log entries the tool doesn't recognise are kept with the lines of each entry. On exit you're offered to upload them (default No); otherwise you're asked to email them. |
 | 2.4.3 | Watch items 15–16 for files skipped by SMB (not seen on the SMB side / existence denied), on by default, with counts by reason and highlights. |

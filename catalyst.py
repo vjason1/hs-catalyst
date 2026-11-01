@@ -7,13 +7,17 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.5
+  Version  : 2.4.6
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Requires : Python 3.7+ (standard library only; uses curl for upload when
              present, otherwise a built-in HTTP upload)
 
   Changelog
+    2.4.6  2026-10-31  Exit summary, saved report and Markdown export gain a
+                       "What these errors mean" section: an explanation and
+                       next steps for each error type found, with PowerShell
+                       AD lookups pre-filled with the SIDs from the log.
     2.4.5  2026-10-31  On exit, offers to export a Markdown summary report
                        (same content as the on-screen summary) and the full
                        log of every error/issue found (-x DIR does it without
@@ -103,7 +107,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.5"
+__version__ = "2.4.6"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -161,6 +165,109 @@ def print_banner(status="Assimilation & Analysis Engine Active"):
     print(f"{BLUE} [::] {WHITE}NAME:  {CYAN} {__expansion__}{RESET}")
     print(f"{BLUE} [::] {WHITE}STATUS:{CYAN} {status}{RESET}")
     print(f"{GRAY}{'=' * 61}{RESET}")
+
+
+# ---------------------------------------------------------------------------
+# What each error type means (shown in the exit summary and exports)
+# ---------------------------------------------------------------------------
+# key: error type as counted (exact), or a prefix ending in "*".
+# "ad": which PowerShell lookups to pre-fill with SIDs from the log ("user", "group", "both").
+EXPLANATIONS = [
+    {"key": "Unmapped SID - ACE dropped", "ad": "both", "sids": "ace", "text": [
+        "A user/group SID could not be mapped to a current AD user/group, so that ACE was dropped. In most cases, "
+        "it is because the user or group was deleted. To verify this, search AD with the PowerShell commands below.",
+        "If the SID maps to a user/group, verify that it was not deleted. If not, verify that the cluster is joined "
+        "to an Active Directory domain, is not having any issues communicating with Active Directory, and (if "
+        "applicable) can query the target domain using a trust from the domain the cluster is joined to."]},
+    {"key": "No such file or directory (err=2) [nfs3_get_attr_by_readdir_file_id]", "text": [
+        "Hammerspace was unable to read a file using the source NFS export. As a result, it was not assimilated. "
+        "To resolve this issue, check the file on the source volume, and, if present and valid, copy it manually "
+        "to Hammerspace. If a large number of files are impacted, then you may need to correct something on the "
+        "source volume, and retry the assimilation into a new/empty destination."]},
+    {"key": "Error importing directory contents", "text": [
+        "Hammerspace experienced an unidentified error importing the contents of a directory using the source NFS "
+        "export. Check that the directory can be read within the Hammerspace share, and that all the contents are "
+        "present (if there were any on the source). If the directory is missing some or all of the contents, check "
+        "it directly on the source volume, and, if unassimilated files are present, copy them manually to "
+        "Hammerspace. If a large number of directories are impacted, then you may need to correct something on the "
+        "source volume (possibly including SMB permissions), and retry the assimilation into a new/empty "
+        "destination."]},
+    {"key": "Issues during import (type=Regular)", "text": [
+        "Hammerspace experienced an unidentified error importing a file using the source NFS export. Check that it "
+        "can be read within the Hammerspace share, and that the contents are intact (if there were any on the "
+        "source). If the file cannot be read, or is empty, check it directly on the source volume, and, if present, "
+        "copy it manually to Hammerspace. If a large number of files are impacted, then you may need to correct "
+        "something on the source volume (possibly including SMB permissions), and retry the assimilation into a "
+        "new/empty destination."]},
+    {"key": "Issues during import (type=Directory)", "text": [
+        "Hammerspace experienced an unidentified error importing a directory using the source NFS export. Check "
+        "that it can be read within the Hammerspace share, and that the contents are present (if there were any on "
+        "the source). If the directory cannot be read, or is missing some or all of the contents, check it directly "
+        "on the source volume, and, if present, copy it manually to Hammerspace. If a large number of directories "
+        "are impacted, then you may need to correct something on the source volume (possibly including SMB "
+        "permissions), and retry the assimilation into a new/empty destination."]},
+    {"key": "Skipped - file not seen on the SMB side", "text": [
+        "This usually indicates that Hammerspace can see the file fine from the source NFS export, but is denied "
+        "when trying to import the ACEs using the source SMB share. As a result, this file is skipped. Check this "
+        "file directly on the source, and, if present, copy it manually to Hammerspace. If a large number of files "
+        "are impacted, then you may need to correct something on the source volume (such as granting the "
+        "assimilation service account access to the denied files), and retry the assimilation into a new/empty "
+        "destination.",
+        "A less common reason for this error is that the file was deleted from the source before the SMB ACEs "
+        "could be read."]},
+    {"key": "Skipped - existence denied by SMB server", "text": [
+        "Hammerspace can see the file fine from the NFS export, but cannot see it from the SMB share. As a result, "
+        "this file is skipped. Check this file directly on the source, and, if present, copy it manually to "
+        "Hammerspace. If a large number of files are impacted, then you may need to correct something on the "
+        "source volume, and retry the assimilation into a new/empty destination.",
+        "One possible reason for this error is that the file was deleted from the source before the SMB ACEs could "
+        "be read."]},
+    {"key": "Unmapped user SID - owner id fallback", "ad": "user", "sids": "user", "text": [
+        "A user SID could not be mapped to a current AD user, so the owning user was set to the fallback (if "
+        "specified in the assimilation options). In most cases, it is because the user was deleted. To verify "
+        "this, search AD with the PowerShell commands below."]},
+    {"key": "Unmapped group SID - group id fallback", "ad": "group", "sids": "group", "text": [
+        "A group SID could not be mapped to a current AD group, so the owning group was set to the fallback (if "
+        "specified in the assimilation options). In most cases, it is because the group was deleted. To verify "
+        "this, search AD with the PowerShell commands below."]},
+    {"key": "Alternate data stream(s) not assimilated", "text": [
+        "Hammerspace does not currently support alternate data streams, so these are not imported during the "
+        "assimilation process. This is expected."]},
+]
+AD_SID_PREFIX = "S-1-5-21-"   # domain accounts; others (e.g. S-1-5-88-* NFS mode SIDs) aren't in AD
+EXPLAIN_MAX_SIDS = 5
+
+
+def _explanation_for(typ):
+    for e in EXPLANATIONS:
+        k = e["key"]
+        if typ == k or (k.endswith("*") and typ.startswith(k[:-1])):
+            return e
+    return None
+
+
+def explanations(engine):
+    """[(sev, type, count, files, entry, sid_list)] for every error type seen that has an explanation."""
+    out = []
+    for (sev, t), n in sorted(engine.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1])):
+        e = _explanation_for(t)
+        if not e:
+            continue
+        sids = []
+        src = {"ace": engine.sids, "user": engine.user_sids, "group": engine.group_sids}.get(e.get("sids"))
+        if src:
+            sids = [(sid, c) for sid, c in src.most_common() if sid.startswith(AD_SID_PREFIX)][:EXPLAIN_MAX_SIDS]
+        out.append((sev, t, n, len(engine.type_files[(sev, t)]), e, sids))
+    return out
+
+
+def ad_commands(e, sids):
+    cmds = ["Import-Module ActiveDirectory"]
+    kinds = {"user": ["Get-ADUser"], "group": ["Get-ADGroup"], "both": ["Get-ADUser", "Get-ADGroup"]}[e["ad"]]
+    for sid, n in (sids or [("<SID>", 0)]):
+        note = f"   # {n:,} entr{'y' if n == 1 else 'ies'}" if n else ""
+        cmds += [f"{k} -Identity {sid}{note}" for k in kinds]
+    return cmds
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +546,8 @@ class Engine:
         self.type_files = collections.defaultdict(set)
         self.sids = collections.Counter()
         self.sid_perm = collections.Counter()
+        self.user_sids = collections.Counter()
+        self.group_sids = collections.Counter()
         self.nobody = 0
         self.ads = 0
         self.feed = collections.deque(maxlen=feed_size)
@@ -513,8 +622,12 @@ class Engine:
                             self.sid_perm[(sid, s[k + 5:s.find(" ", k)])] += 1
                     return ("WARN", "Unmapped SID - ACE dropped")
                 if s.startswith('warning msg="Could not map User SID'):
+                    i = s.find('SID="') + 5
+                    self.user_sids[s[i:s.find('"', i)]] += 1
                     return ("WARN", "Unmapped user SID - owner id fallback")
                 if s.startswith('warning msg="Could not map Group SID'):
+                    i = s.find('SID="') + 5
+                    self.group_sids[s[i:s.find('"', i)]] += 1
                     return ("WARN", "Unmapped group SID - group id fallback")
                 if "alternate stream" in s:
                     self.ads += 1
@@ -754,13 +867,9 @@ class Engine:
                     out.append(("ISSUE" if pct >= 25 else "WARN",
                                 f"{fs.name}: {fs.nobody:,} items (~{pct}%) now owned by uid 65534 (nobody)"))
             for reason, n in fs.skips.most_common():
-                if reason == "file not seen on the SMB side":
-                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - not seen on the SMB side (present over NFS"
-                                         f" but not visible through SMB; check SMB share path, vetoed/hidden files, name"
-                                         f" characters SMB can't show)"))
-                elif reason == "existence denied by SMB server":
-                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - existence denied by SMB server (check SMB"
-                                         f" share/ACL permissions for the account used by the assimilation)"))
+                if reason in ("file not seen on the SMB side", "existence denied by SMB server"):
+                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"
+                                         f" (see 'What these errors mean')"))
                 else:
                     out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"))
             if fs.ads:
@@ -1111,6 +1220,21 @@ def summary_text(engine, live, stall, color=True):
         out.append(f"\n{c(WHITE)}TOP UNMAPPED SIDs (ACE dropped){R}")
         for sid, n in engine.sids.most_common(8):
             out.append(f"  {n:>11,}  {sid}")
+    ex = explanations(engine)
+    if ex:
+        import textwrap
+        width = max(60, min(110, shutil.get_terminal_size((100, 40)).columns - 2))
+        out.append(f"\n{c(WHITE)}WHAT THESE ERRORS MEAN{R}")
+        for sev, t, n, nf, e, sids in ex:
+            out.append(f"\n  {c(SEV_COLOR[sev])}{sev:5s}{R} {c(BOLD)}{t}{R}  ({n:,} in {nf} file{'s' if nf != 1 else ''})")
+            for i, para in enumerate(e["text"]):
+                if i:
+                    out.append("")
+                out += textwrap.wrap(para, width, initial_indent="    ", subsequent_indent="    ")
+            if e.get("ad"):
+                out.append("")
+                out.append("    " + ("Look up the most frequent domain SIDs from this log:" if sids else "Look up a SID:"))
+                out += [f"      {c(GRAY)}{cmd}{R}" for cmd in ad_commands(e, sids)]
     hl = engine.highlights(live, stall)
     if hl:
         out.append(f"\n{c(WHITE)}HIGHLIGHTS{R}")
@@ -1159,6 +1283,16 @@ def summary_markdown(engine, live, stall, args=None):
     if engine.sids:
         out += ["", "## Top unmapped SIDs (ACE dropped)", "", "| Count | SID |", "|--:|---|"]
         out += [f"| {n:,} | `{sid}` |" for sid, n in engine.sids.most_common(8)]
+    ex = explanations(engine)
+    if ex:
+        out += ["", "## What these errors mean", ""]
+        for sev, t, n, nf, e, sids in ex:
+            out += [f"### {sevs[sev]} — {_md(t)}", "", f"*{n:,} in {nf} file{'s' if nf != 1 else ''}*", ""]
+            for para in e["text"]:
+                out += [para, ""]
+            if e.get("ad"):
+                out += [("Look up the most frequent domain SIDs from this log:" if sids else "Look up a SID:"), ""]
+                out += ["```powershell"] + ad_commands(e, sids) + ["```", ""]
     out += ["", "## Per file", ""]
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
