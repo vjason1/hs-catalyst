@@ -7,7 +7,7 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.9
+  Version  : 2.5.0
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Platform : Linux - the Hammerspace Anvil is Linux-based, and that is where
@@ -19,6 +19,12 @@ Hammerspace C.A.T.A.L.Y.S.T.
              HTTP upload)
 
   Changelog
+    2.5.0  2026-10-31  States that monitoring a running assimilation needs
+                       Hammerspace support (logs underway are only on the
+                       Anvil), and that end users examine completed logs in
+                       <share>/assimilation-logs/. Shown at the live prompt,
+                       when /pd/assimilation-logs isn't found, in replay and
+                       in -h. Corrected where finished logs are moved to.
     2.4.9  2026-10-31  Windows support: logs aren't held open (so they can
                        still be moved), unreliable Windows/SMB file ids are
                        ignored, ANSI enabled via the console API with a plain
@@ -54,7 +60,7 @@ Hammerspace C.A.T.A.L.Y.S.T.
                        Target may be a folder, a log file, or a log file name;
                        folders are always searched recursively. Log files are
                        held open so the final lines are still read after the
-                       log is moved into the destination share at completion.
+                       log is moved to the share's assimilation-logs folder.
                        Author name removed from the on-screen output.
     2.4.1  2026-10-29  Initial release: live monitor (recursive discovery,
                        tailing, stall detection), replay with original timing,
@@ -80,19 +86,31 @@ Saving / uploading:
 Live monitor and replay tool for Hammerspace assimilation logs.
 
 Where the logs are:
-  While an assimilation runs, its log is on the Anvil at
-      /pd/assimilation-logs/<date-time stamp>/HS_root.log
-  When it finishes, the log is moved into the destination share, so that folder
-  normally holds only the folder for the run in progress. Live mode watches it
-  by default and picks up new runs as they start. You can instead give:
-      a folder      searched recursively for assimilation logs
-      a log file    e.g. /shares/foo/COM.X_1724094740_HS_root.log
-      a file name   e.g. HS_root.log, or part of one such as ONCOR; searched
-                    for recursively under the default folder (or the folder
-                    in front of it, e.g. /shares/foo/ONCOR)
+  Completed assimilations (end users):
+      <share>/assimilation-logs/
+  Every Hammerspace share has an assimilation-logs folder at its root holding
+  the logs of assimilations into that share once they have finished. This is
+  what end users can examine: point the tool at the share (or that folder)
+  and use replay, or live mode to watch for new logs arriving there.
 
-  python3 catalyst.py                 # live monitor of /pd/assimilation-logs (prompts first)
-  python3 catalyst.py -d /some/share  # live monitor of another folder / file / file name
+  Assimilations that are running (Hammerspace support only):
+      /pd/assimilation-logs/<date-time stamp>/HS_root.log   (on the Anvil)
+  While an assimilation is underway its log is only on the Anvil, which end
+  users cannot access. Monitoring a running assimilation on a Hammerspace
+  cluster therefore requires Hammerspace support. When it finishes, the log is
+  moved to the share's assimilation-logs folder. Live mode watches
+  /pd/assimilation-logs by default (for support sessions on the Anvil).
+
+  Folders are always searched recursively. You can give:
+      a folder      e.g. /mnt/finance  or  /mnt/finance/assimilation-logs
+      a log file    e.g. /mnt/finance/assimilation-logs/COM.X_1724094740_HS_root.log
+      a file name   e.g. HS_root.log, or part of one such as ONCOR; searched
+                    for under the default folder (or the folder in front of
+                    it, e.g. /mnt/finance/ONCOR)
+
+  python3 catalyst.py replay -d /mnt/finance   # completed logs in a share (end users)
+  python3 catalyst.py -d /mnt/finance          # watch a share for new completed logs
+  python3 catalyst.py                 # live monitor of /pd/assimilation-logs (Hammerspace support, on the Anvil)
   python3 catalyst.py replay          # replay one or more logs with original timing
   python3 catalyst.py simulate SRC DST  # write SRC into DST gradually (to test live mode)
   python3 catalyst.py -h              # all options
@@ -116,14 +134,14 @@ import time
 # Defaults you may want to edit
 # ---------------------------------------------------------------------------
 DEFAULT_LIVE_DIR = os.environ.get("CATALYST_DIR", "/pd/assimilation-logs")
-# Matches the running log (HS_root.log) and logs already moved into shares (<share>_<epoch>_HS_root.log)
+# Matches the running log (HS_root.log) and completed logs in <share>/assimilation-logs/
 DEFAULT_FILE_GLOB = os.environ.get("CATALYST_GLOB", "*HS_root.log")
 CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.9"
+__version__ = "2.5.0"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -558,7 +576,7 @@ class FileState:
         self.rec_unknown = None  # unrecognised type found in the current entry, if any
         self.rec_unknown_idx = 0
         self.fh = None        # kept open so we can finish reading after the log is moved/deleted
-        self.gone = False     # path no longer points at this log (moved into share / deleted)
+        self.gone = False     # path no longer points at this log (moved to the share's assimilation-logs / deleted)
 
     @property
     def items(self):
@@ -1019,7 +1037,7 @@ def _log_gone(engine, fs, replaced):
         return
     fs.gone = True
     if fs.completed:
-        engine.event("NOTE", "Assimilation finished - log moved into destination share", fs, fs.path)
+        engine.event("NOTE", "Assimilation finished - log moved to the share's assimilation-logs folder", fs, fs.path)
     else:
         engine.event("ERROR", "Log disappeared before 'Assimilation complete'", fs, fs.path)
 
@@ -1618,6 +1636,12 @@ def ask(prompt, default):
     return v or default
 
 
+SUPPORT_NOTE = (
+    "Monitoring an assimilation while it is running requires Hammerspace support: its log is only on the Anvil\n"
+    f"({DEFAULT_LIVE_DIR}/<date-time>/HS_root.log), which end users cannot access. End users can examine logs of\n"
+    "completed assimilations in the assimilation-logs folder at the root of each Hammerspace share.")
+
+
 def _ino(p):
     try:
         return os.stat(p).st_ino
@@ -1627,10 +1651,14 @@ def _ino(p):
 
 def run_live(args, cfg):
     target = args.dir or DEFAULT_LIVE_DIR
+    note_shown = False
     while True:
         if not args.no_prompt and not args.dir:
-            print(f"{GRAY}Running assimilations log to {DEFAULT_LIVE_DIR}/<date-time>/HS_root.log on the Anvil.{RESET}")
-            print(f"{GRAY}Press Enter for that, or give a folder (searched recursively), a log file, or a file name.{RESET}")
+            if not note_shown:
+                print(f"{YELLOW}{SUPPORT_NOTE}{RESET}")
+                note_shown = True
+            print(f"{GRAY}Enter = {DEFAULT_LIVE_DIR} (support, on the Anvil). Or give a share or its assimilation-logs{RESET}")
+            print(f"{GRAY}folder, a log file, or a file name. Folders are searched recursively.{RESET}")
             target = ask(f"{WHITE}Monitor{RESET}", target)
         root, pattern, desc = resolve_target(target, args.glob, [DEFAULT_LIVE_DIR, os.getcwd()])
         if os.path.isdir(root) and not args.glob_given and not args.no_prompt and pattern == args.glob \
@@ -1641,8 +1669,12 @@ def run_live(args, cfg):
             break
         if root == os.path.abspath(DEFAULT_LIVE_DIR) and os.path.isdir(os.path.dirname(root)):
             break  # on an Anvil before any assimilation has created the folder: wait for it
-        print(f"{RED}Not found: {root}{RESET}"
-              + (" - this doesn't look like an Anvil; give a folder, log file, or file name." if root == DEFAULT_LIVE_DIR else ""))
+        print(f"{RED}Not found: {root}{RESET}")
+        if root == os.path.abspath(DEFAULT_LIVE_DIR):
+            if not note_shown:
+                print(f"{YELLOW}{SUPPORT_NOTE}{RESET}")
+                note_shown = True
+            print("Give a share (or its assimilation-logs folder), a log file, or a file name instead.")
         if args.no_prompt or args.dir:
             return 2
         target = DEFAULT_LIVE_DIR if target != DEFAULT_LIVE_DIR else os.getcwd()
@@ -1754,7 +1786,9 @@ def run_replay(args, cfg):
     target = args.dir or cfg.get("replay_dir") or os.getcwd()
     while True:
         if not args.no_prompt and not args.dir:
-            target = ask(f"{WHITE}Replay{RESET} (folder searched recursively, log file, or log file name)", target)
+            print(f"{GRAY}Completed assimilation logs are in the assimilation-logs folder at the root of each{RESET}")
+            print(f"{GRAY}Hammerspace share. Give the share, that folder, a log file, or a file name.{RESET}")
+            target = ask(f"{WHITE}Replay{RESET} (folders are searched recursively)", target)
         root, pattern, desc = resolve_target(target, args.glob, [os.getcwd(), DEFAULT_LIVE_DIR])
         if os.path.isdir(root) and not args.glob_given and not args.no_prompt and pattern == args.glob \
                 and os.path.abspath(os.path.expanduser(target)) == root:
@@ -1921,7 +1955,7 @@ def main(argv=None):
         prog="catalyst",
         description=f"{__fullname__}\nv{__version__} - live monitor & replay for Hammerspace assimilation logs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Keys while running: q quit, f cycle feed filter, c clear feed, p pause, +/- replay speed, "
+        epilog=SUPPORT_NOTE + "\n\nKeys while running: q quit, f cycle feed filter, c clear feed, p pause, +/- replay speed, "
                "s skip to next record (replay).\nCustom watch items: plain text or re:<regex>; prefix "
                "E: I: W: N: to set severity, e.g.  --add 'E:re:err=(5|28)'")
     ap.add_argument("mode", nargs="?", default="live", choices=["live", "replay", "simulate"])

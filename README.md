@@ -9,12 +9,16 @@ Live monitor and replay tool for Hammerspace assimilation logs (`HS_root.log`). 
 - Runs on **Linux**, the primary platform: the Hammerspace Anvil is Linux-based, and live monitoring of `/pd/assimilation-logs` happens there. Also runs on Windows 10/11 and macOS (see [Platforms](#platforms))
 - Full guide: [`docs/Hammerspace_CATALYST.docx`](docs/Hammerspace_CATALYST.docx) (also importable into Confluence)
 
+> [!IMPORTANT]
+> **Running assimilations require Hammerspace support.** While an assimilation is underway, its log is only on the Anvil (`/pd/assimilation-logs`), which end users can't access. **End users can examine logs of completed assimilations**, which are stored in the `assimilation-logs` folder at the root of each Hammerspace share.
+
 ## Quick start
 
 ```bash
-python3 catalyst.py              # live: watch /pd/assimilation-logs on the Anvil
-python3 catalyst.py replay       # replay a finished log with its original timing
-python3 catalyst.py -h           # all options
+python3 catalyst.py replay -d /mnt/finance   # end users: completed logs in a share's assimilation-logs folder
+python3 catalyst.py -d /mnt/finance          # end users: watch a share for newly completed logs
+python3 catalyst.py                          # Hammerspace support, on the Anvil: watch running assimilations
+python3 catalyst.py -h                       # all options
 ```
 
 Press **Enter** at the prompts to accept the defaults, then **q** to stop and see the summary.
@@ -23,9 +27,9 @@ Press **Enter** at the prompts to accept the defaults, then **q** to stop and se
 
 | Platform | Use | How to run |
 |---|---|---|
-| **Linux / Hammerspace Anvil** (primary) | Live monitoring of running assimilations, replay | `python3 catalyst.py` |
-| Windows 10/11 | Replay, or monitoring logs copied off the Anvil or on a share | `py catalyst.py` (or `python catalyst.py`) |
-| macOS | Replay, or monitoring copied logs | `python3 catalyst.py` |
+| **Linux** (primary) | Completed logs from a share; on the Anvil, live monitoring of running assimilations (Hammerspace support) | `python3 catalyst.py` |
+| Windows 10/11 | Completed logs from a mounted share, or copied logs | `py catalyst.py` (or `python catalyst.py`) |
+| macOS | Completed logs from a mounted share, or copied logs | `python3 catalyst.py` |
 
 Notes for Windows:
 
@@ -36,19 +40,20 @@ Notes for Windows:
 
 ## Where the logs are
 
-While an assimilation runs, its log is at:
+| Assimilation | Log location | Who can access it |
+|---|---|---|
+| **Completed** | `<share>/assimilation-logs/` (the `assimilation-logs` folder at the root of each Hammerspace share) | **End users** |
+| **Running** | `/pd/assimilation-logs/<date-time stamp>/HS_root.log` on the Anvil | **Hammerspace support only** |
 
-```
-/pd/assimilation-logs/<date-time stamp>/HS_root.log
-```
+**End users:** point the tool at the share, or at its `assimilation-logs` folder. Use `replay` to analyze completed logs, or live mode to watch for new logs as assimilations finish. Folders are searched recursively, so giving the share root finds `assimilation-logs` automatically.
 
-When the assimilation finishes, the log is moved into the destination share as `<share>_<epoch>_HS_root.log`. C.A.T.A.L.Y.S.T. watches `/pd/assimilation-logs` by default and picks up new runs as they start. It keeps each log open so the final lines are still read after the move.
+**Hammerspace support (on the Anvil):** live mode watches `/pd/assimilation-logs` by default and picks up new runs as they start. When an assimilation finishes, Hammerspace moves its log to the share's `assimilation-logs` folder. On Linux the tool keeps each log open, so it still reads the final lines after the move.
 
 | Status | Meaning |
 |---|---|
 | `ACTIVE` | Log is still growing |
 | `COMPLETE` | Log contains `Assimilation complete` |
-| `MOVED` | Completed and moved into the destination share (normal) |
+| `MOVED` | Completed and moved to the share's `assimilation-logs` folder (normal) |
 | `STALLED` | No growth for `--stall-secs` and no completion line |
 | `VANISHED` | Log disappeared before completing |
 | `INCOMPLETE` | Replay: log ended without `Assimilation complete` |
@@ -59,11 +64,11 @@ The `-d` option, or the **Monitor** prompt, accepts any of these. Folders are al
 
 | Input | Example |
 |---|---|
-| Nothing (default) | `/pd/assimilation-logs` |
-| A folder | `-d /shares/finance` |
-| A log file | `-d /shares/finance/COM.X_1724094740_HS_root.log` |
+| Nothing (default) | `/pd/assimilation-logs` (Hammerspace support, on the Anvil) |
+| A share, or its `assimilation-logs` folder | `-d /mnt/finance` or `-d /mnt/finance/assimilation-logs` |
+| A log file | `-d /mnt/finance/assimilation-logs/COM.X_1724094740_HS_root.log` |
 | A file name, or part of one | `-d HS_root.log`, `-d ONCOR` |
-| A folder plus a name | `-d /shares/finance/ONCOR` |
+| A folder plus a name | `-d /mnt/finance/ONCOR` |
 
 ## Watch items
 
@@ -242,7 +247,7 @@ Send these entries to Hammerspace so the tool can learn them? (y/N)
 python3 catalyst.py -o                                    # watch, save, ask about upload at the end
 python3 catalyst.py -y -u                                 # unattended, upload on exit
 python3 catalyst.py -x ~/reports                          # export Markdown summary + error log on exit
-python3 catalyst.py -d /shares/finance                    # watch a share with finished logs
+python3 catalyst.py -d /mnt/finance                       # watch a share for newly completed logs
 python3 catalyst.py replay -d ./logs --speed 20           # replay at 20x
 python3 catalyst.py replay -y -d ./logs --speed max \
     --plain --report report.txt --matches-csv hits.csv    # analyze all logs fast, grep-style
@@ -263,6 +268,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.5.0 | Notes that monitoring running assimilations requires Hammerspace support, and that end users examine completed logs in `<share>/assimilation-logs/`. Corrected where finished logs are moved to. |
 | 2.4.9 | Windows support (console colors and fallback, safe file handling, no crashes on unsupported characters). Linux remains the primary platform. |
 | 2.4.8 | `-O` / `--output-dir` (or `CATALYST_OUT`) sets where all output goes; default `/tmp`. Exports default to it. |
 | 2.4.7 | Banner now spells CATALYST. Startup hint split over two lines. |
