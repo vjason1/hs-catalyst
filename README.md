@@ -97,6 +97,19 @@ Skipped lines are counted by reason (for example *Skipped - file not seen on the
 
 The upload bundles both files as a `.tar.gz` and POSTs them to the Hammerspace endpoint the same way as `dme-watch.sh`. It uses `curl` if installed, or a built-in HTTP upload otherwise. Override the endpoint with `--upload-url` or `CATALYST_UPLOAD_URL`.
 
+## Log entries the tool doesn't recognise
+
+If a log contains an entry C.A.T.A.L.Y.S.T. doesn't recognise, it appears in the feed as a NOTE and in the highlights. Each one is kept with every line of its log entry (the timestamp line plus its indented detail lines). Up to 3 examples of each kind are kept.
+
+When you quit, the tool lists these entries, saves them to `/tmp/catalyst_<host>_<timestamp>_unknown.txt`, and asks:
+
+```
+Send these entries to Hammerspace so the tool can learn them? (y/N)
+```
+
+- **y**: the file is bundled as `/tmp/catalyst_unknown_<host>_<timestamp>.tar.gz` and uploaded the same way as other captures.
+- **N** (the default), or no terminal: you're asked to email the log entry text to **jason.ventresco@hammerspace.com**, and given the file to copy or attach.
+
 ## Examples
 
 ```bash
@@ -122,6 +135,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.4.4 | Log entries the tool doesn't recognise are kept with the lines of each entry. On exit you're offered to upload them (default No); otherwise you're asked to email them. |
 | 2.4.3 | Watch items 15–16 for files skipped by SMB (not seen on the SMB side / existence denied), on by default, with counts by reason and highlights. |
 | 2.4.2 | Live mode watches `/pd/assimilation-logs` by default. Accepts a folder, log file, or file name. Handles logs moved at completion (`MOVED`) or removed early (`VANISHED`). |
 | 2.4.1 | Initial release |

@@ -7,13 +7,17 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.3
+  Version  : 2.4.4
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Requires : Python 3.7+ (standard library only; uses curl for upload when
              present, otherwise a built-in HTTP upload)
 
   Changelog
+    2.4.4  2026-10-31  Log entries the tool doesn't recognise are kept with
+                       all lines of the entry. On exit it offers (default
+                       No) to upload them to Hammerspace; if declined, it
+                       asks you to email them to REPORT_EMAIL.
     2.4.3  2026-10-31  New watch items 15-16 (on by default):
                          Skipped "..." because file not seen on the SMB side
                          Skipped "..." because existence denied by SMB server
@@ -95,13 +99,18 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.3"
+__version__ = "2.4.4"
 __date__ = "2026-10-29"
 VERSION = __version__
 
 # Upload (same request as dme-watch.sh). Note: like curl --insecure, TLS verification is skipped.
 UPLOAD_URL = os.environ.get("CATALYST_UPLOAD_URL", "https://v1proto.sc.hammerspace.com/upload/")
 UPLOAD_FIELDS = {"payload": "prosvcs", "cluster_id": "manual", "payload_type": "prosvcs"}
+# Where to send unrecognised log entries if they choose not to upload them.
+REPORT_EMAIL = "jason.ventresco@hammerspace.com"
+UNKNOWN_MAX_TYPES = 200      # distinct unrecognised entry types kept
+UNKNOWN_MAX_EXAMPLES = 3     # examples kept per type
+UNKNOWN_MAX_LINES = 50       # lines kept per example entry
 HOST = __import__("socket").gethostname().split(".")[0] or "host"
 RUN_STAMP = time.strftime("%Y-%m-%d_%H%M%S")
 SAVE_DIR = "/tmp" if os.path.isdir("/tmp") else __import__("tempfile").gettempdir()
@@ -389,6 +398,10 @@ class FileState:
         self.nobody = 0
         self.ads = 0
         self.skips = collections.Counter()  # skip reason -> count
+        self.rec = []           # lines of the current log entry (header + indented detail lines)
+        self.rec_start = 0      # line number where the current entry starts
+        self.rec_unknown = None  # unrecognised type found in the current entry, if any
+        self.rec_unknown_idx = 0
         self.fh = None        # kept open so we can finish reading after the log is moved/deleted
         self.gone = False     # path no longer points at this log (moved into share / deleted)
 
@@ -423,6 +436,7 @@ class Engine:
         self.nobody = 0
         self.ads = 0
         self.feed = collections.deque(maxlen=feed_size)
+        self.unknown = collections.OrderedDict()  # type -> {"count": n, "examples": [(path, line, [lines])]}
         self.total_lines = 0
         self.total_bytes = 0
         self.plain = plain
@@ -577,11 +591,20 @@ class Engine:
     def process_line(self, fs, line):
         fs.lineno += 1
         self.total_lines += 1
+        if line[:1] in (" ", "\t") and fs.rec:
+            if len(fs.rec) < UNKNOWN_MAX_LINES:
+                fs.rec.append(line)
+        else:
+            self.flush_entry(fs)
+            fs.rec, fs.rec_start = [line], fs.lineno
         cls = self._classify(fs, line)
         if cls:
             self.types[cls] += 1
             fs.types[cls] += 1
             self.type_files[cls].add(fs.idx)
+            if cls[0] == "NOTE" and fs.rec_unknown is None:
+                fs.rec_unknown = cls[1]
+                fs.rec_unknown_idx = len(fs.rec) - 1
 
         hits = None
         if self.watches:
@@ -613,6 +636,19 @@ class Engine:
                 self.csv[1].writerow([fs.path, fs.lineno, tstr, sev, typ, labels, fs.cur_path, line.rstrip()])
             if self.plain:
                 self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name}:{fs.lineno} {typ} | {fs.cur_path} | {line.strip()[:200]}")
+
+    def flush_entry(self, fs):
+        """Keep the finished log entry if it contained an unrecognised line."""
+        t = fs.rec_unknown
+        if t is not None:
+            u = self.unknown.get(t)
+            if u is None and len(self.unknown) < UNKNOWN_MAX_TYPES:
+                u = self.unknown[t] = {"count": 0, "examples": []}
+            if u is not None:
+                u["count"] += 1
+                if len(u["examples"]) < UNKNOWN_MAX_EXAMPLES:
+                    u["examples"].append((fs.path, fs.rec_start, list(fs.rec), fs.rec_unknown_idx))
+        fs.rec_unknown = None
 
     def event(self, sev, typ, fs, text):
         tstr = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -696,7 +732,8 @@ class Engine:
                                     f" assimilated (macOS resource forks / Windows ADS lost)"))
         unk = sum(c for (sev, t), c in self.types.items() if sev == "NOTE")
         if unk:
-            out.append(("NOTE", f"{unk} line(s) in a format not seen in the samples - see feed"))
+            out.append(("NOTE", f"{unk} log entr{'y' if unk == 1 else 'ies'} C.A.T.A.L.Y.S.T. doesn't recognise -"
+                                f" you'll be offered to send them to Hammerspace when you quit"))
         out.sort(key=lambda x: SEV_RANK[x[0]])
         return out
 
@@ -1065,9 +1102,9 @@ def setup_save(args):
         args.started_at = time.strftime("%a %b %d %H:%M:%S %Z %Y")
 
 
-def do_upload(files, url):
+def do_upload(files, url, tarball=None):
     import tarfile
-    _, _, tarball = capture_paths()
+    tarball = tarball or capture_paths()[2]
     files = [f for f in files if f and os.path.exists(f)]
     print("Compressing files...")
     try:
@@ -1134,9 +1171,12 @@ def finish(engine, args, live):
         print(f"\nReport written to {args.report}")
     if args.matches_csv:
         print(f"Matched lines written to {args.matches_csv}")
-    if not args.save:
-        return
+    if args.save:
+        _capture_upload(engine, args)
+    _offer_unknown(engine, args, live)
 
+
+def _capture_upload(engine, args):
     entries = len(engine.feed) if engine.csv is None else sum(w.hits for w in engine.watches)
     concerns = sum(c for (sev, t), c in engine.types.items() if sev in ("ERROR", "ISSUE"))
     print(f"Saved {entries:,} matched entries ({concerns:,} errors/issues seen) to {SAVE_DIR}")
@@ -1151,6 +1191,65 @@ def finish(engine, args, live):
         do_upload([args.report, args.matches_csv], args.upload_url)
     else:
         print(f"Upload skipped. Files remain at {args.report}" + (f" and {args.matches_csv}" if args.matches_csv else ""))
+
+
+def unknown_text(engine, live):
+    out = [f"# {__fullname__}",
+           f"# v{__version__} - log entries this version does not recognise",
+           f"# Host:      {HOST}",
+           f"# Mode:      {'live' if live else 'replay'}",
+           f"# Generated: {time.strftime('%a %b %d %H:%M:%S %Z %Y')}",
+           f"# Logs:      {', '.join(fs.path for fs in engine.files)}",
+           "#"]
+    for t, u in engine.unknown.items():
+        out.append("")
+        out.append(f"== {t}   ({u['count']:,} occurrence{'s' if u['count'] != 1 else ''})")
+        for path, ln, lines, idx in u["examples"]:
+            out.append(f"-- {path} : line {ln}" + (f"  (unrecognised: line {ln + idx})" if idx else ""))
+            out.extend(lines)
+    return "\n".join(out) + "\n"
+
+
+def _offer_unknown(engine, args, live):
+    """Offer to send unrecognised log entries (with the lines of each entry) to Hammerspace. Default: no."""
+    for fs in engine.files:
+        engine.flush_entry(fs)
+    if not engine.unknown:
+        return
+    total = sum(u["count"] for u in engine.unknown.values())
+    path = os.path.join(SAVE_DIR, f"catalyst_{HOST}_{RUN_STAMP}_unknown.txt")
+    text = unknown_text(engine, live)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+    except OSError as e:
+        print(f"{RED}Could not write {path}: {e}{RESET}")
+        path = None
+
+    print("\n" + "-" * 69)
+    print(f"{MAGENTA}Found {total:,} log entr{'y' if total == 1 else 'ies'} ({len(engine.unknown)} kind"
+          f"{'s' if len(engine.unknown) != 1 else ''}) that C.A.T.A.L.Y.S.T. doesn't recognise:{RESET}")
+    for t, u in list(engine.unknown.items())[:10]:
+        p, ln, lines, idx = u["examples"][0]
+        print(f"  {u['count']:>7,}  {t}")
+        print(f"           {GRAY}{lines[idx].strip()[:150]}{RESET}")
+    if len(engine.unknown) > 10:
+        print(f"  … and {len(engine.unknown) - 10} more kinds")
+    if path:
+        print(f"Saved with the lines of each entry to: {path}")
+
+    send = False
+    if sys.stdin.isatty():
+        send = ask("Send these entries to Hammerspace so the tool can learn them? (y/N)", "n").lower().startswith("y")
+    if send and path:
+        tarball = os.path.join(SAVE_DIR, f"catalyst_unknown_{HOST}_{RUN_STAMP}.tar.gz")
+        if do_upload([path], args.upload_url, tarball):
+            return
+        print(f"{YELLOW}The upload didn't go through.{RESET}")
+    print(f"{WHITE}Please email the log entry text to {REPORT_EMAIL}{RESET}"
+          + (f"\n  (copy it from {path}, or attach that file)" if path else ""))
+    if not path:
+        print(text)
 
 
 # ---------------------------------------------------------------------------
