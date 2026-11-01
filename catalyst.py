@@ -7,7 +7,7 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.5.1
+  Version  : 2.5.2
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Platform : Linux - the Hammerspace Anvil is Linux-based, and that is where
@@ -19,6 +19,12 @@ Hammerspace C.A.T.A.L.Y.S.T.
              HTTP upload)
 
   Changelog
+    2.5.2  2026-11-01  "e" opens an error guide while the scan keeps running:
+                       error types found so far first (worst, most frequent,
+                       live counts, NEW tags, SID lookups), then the other
+                       known types. Arrow/Page/Home/End keys scroll; e, Esc
+                       or q return to the scan. Keys are read without losing
+                       fast keystrokes, and arrow keys are understood.
     2.5.1  2026-10-31  Completed logs are shown in their dated folder:
                        <share>/assimilation-logs/<date-time stamp>/<log>.
     2.5.0  2026-10-31  States that monitoring a running assimilation needs
@@ -147,7 +153,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.5.1"
+__version__ = "2.5.2"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -321,11 +327,70 @@ def explanations(engine):
         e = _explanation_for(t)
         if not e:
             continue
-        sids = []
-        src = {"ace": engine.sids, "user": engine.user_sids, "group": engine.group_sids}.get(e.get("sids"))
-        if src:
-            sids = [(sid, c) for sid, c in src.most_common() if sid.startswith(AD_SID_PREFIX)][:EXPLAIN_MAX_SIDS]
-        out.append((sev, t, n, len(engine.type_files[(sev, t)]), e, sids))
+        out.append((sev, t, n, len(engine.type_files[(sev, t)]), e, _top_sids(engine, e)))
+    return out
+
+
+def _top_sids(engine, e):
+    src = {"ace": engine.sids, "user": engine.user_sids, "group": engine.group_sids}.get(e.get("sids"))
+    if not src:
+        return []
+    return [(sid, c) for sid, c in src.most_common() if sid.startswith(AD_SID_PREFIX)][:EXPLAIN_MAX_SIDS]
+
+
+def guide_lines(engine, width, known_before=None):
+    """Lines for the in-scan error guide: types found so far first (worst, most frequent first),
+    then every other type the tool can explain."""
+    import textwrap
+
+    def para(text, color=""):
+        return [f"{color}{l}{RESET}" for l in textwrap.wrap(text, width, initial_indent="      ",
+                                                              subsequent_indent="      ")]
+    out = []
+    seen = sorted(engine.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1]))
+    explained = set()
+    out.append(f"{WHITE}FOUND IN THIS SCAN{RESET}  {GRAY}({len(seen)} type{'s' if len(seen) != 1 else ''},"
+               f" worst first; counts update live){RESET}")
+    out.append("")
+    if not seen:
+        out += [f"  {GRAY}Nothing found yet - this list fills in as the scan finds errors.{RESET}", ""]
+    for (sev, t), n in seen:
+        nf = len(engine.type_files[(sev, t)])
+        new = (f" {MAGENTA}NEW{RESET}" if known_before is not None and (sev, t) not in known_before else "")
+        out.append(f"  {SEV_COLOR[sev]}{sev:5s}{RESET} {BOLD}{n:>11,}{RESET}  {BOLD}{t}{RESET}"
+                   f"  {GRAY}({nf} file{'s' if nf != 1 else ''}){RESET}{new}")
+        e = _explanation_for(t)
+        if e:
+            explained.add(e["key"])
+            for i, ptext in enumerate(e["text"]):
+                if i:
+                    out.append("")
+                out += para(ptext)
+            if e.get("ad"):
+                sids = _top_sids(engine, e)
+                out.append("")
+                out.append("      " + ("Look up the most frequent domain SIDs from this log:" if sids else "Look up a SID:"))
+                out += [f"        {GRAY}{c}{RESET}" for c in ad_commands(e, sids)]
+        elif sev == "NOTE":
+            out += para("This version doesn't recognise this log entry. When you quit you'll be offered to send it "
+                        f"to Hammerspace (or asked to email it to {REPORT_EMAIL}).", GRAY)
+        else:
+            out += para("No description for this error type yet. Check HIGHLIGHTS on the scan screen.", GRAY)
+        out.append("")
+    rest = [e for e in EXPLANATIONS if e["key"] not in explained]
+    if rest:
+        out.append(f"{WHITE}OTHER ERROR TYPES{RESET}  {GRAY}(not seen in this scan){RESET}")
+        out.append("")
+        for e in rest:
+            out.append(f"  {GRAY}-----{RESET} {e['key']}")
+            for i, ptext in enumerate(e["text"]):
+                if i:
+                    out.append("")
+                out += para(ptext, GRAY)
+            if e.get("ad"):
+                out.append("")
+                out += [f"        {GRAY}{c}{RESET}" for c in ad_commands(e, [])]
+            out.append("")
     return out
 
 
@@ -1094,9 +1159,41 @@ def read_new(engine, fs, budget):
 # Keyboard (non-blocking)
 # ---------------------------------------------------------------------------
 class Keys:
+    """Non-blocking single keys. Special keys come back as UP, DOWN, PGUP, PGDN, HOME, END, ESC."""
+    SEQ = {"\x1b[A": "UP", "\x1b[B": "DOWN", "\x1bOA": "UP", "\x1bOB": "DOWN",
+           "\x1b[5~": "PGUP", "\x1b[6~": "PGDN", "\x1b[H": "HOME", "\x1b[F": "END",
+           "\x1bOH": "HOME", "\x1bOF": "END", "\x1b[1~": "HOME", "\x1b[4~": "END",
+           "\x1b[C": "RIGHT", "\x1b[D": "LEFT"}
+    WIN = {"H": "UP", "P": "DOWN", "I": "PGUP", "Q": "PGDN", "G": "HOME", "O": "END", "M": "RIGHT", "K": "LEFT"}
+
     def __init__(self):
         self.ok = sys.stdin.isatty()
         self.old = None
+        self.pending = []
+
+    @classmethod
+    def parse(cls, data):
+        keys, i = [], 0
+        while i < len(data):
+            if data[i] == "\x1b":
+                for seq, name in cls.SEQ.items():
+                    if data.startswith(seq, i):
+                        keys.append(name)
+                        i += len(seq)
+                        break
+                else:
+                    if i + 1 < len(data) and data[i + 1] in "[O":  # unknown sequence: skip it
+                        j = i + 2
+                        while j < len(data) and not (data[j].isalpha() or data[j] == "~"):
+                            j += 1
+                        i = j + 1
+                    else:
+                        keys.append("ESC")
+                        i += 1
+                continue
+            keys.append(data[i])
+            i += 1
+        return keys
 
     def __enter__(self):
         if self.ok and os.name != "nt":
@@ -1115,17 +1212,32 @@ class Keys:
         if not self.ok:
             time.sleep(timeout)
             return None
+        if self.pending:
+            return self.pending.pop(0)
         if os.name == "nt":
             import msvcrt
             end = time.time() + timeout
-            while time.time() < end:
+            while True:
                 if msvcrt.kbhit():
-                    return msvcrt.getwch()
+                    ch = msvcrt.getwch()
+                    if ch in ("\x00", "\xe0"):
+                        return self.WIN.get(msvcrt.getwch())
+                    return "ESC" if ch == "\x1b" else ch
+                if time.time() >= end:
+                    return None
                 time.sleep(0.02)
-            return None
         import select
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        return sys.stdin.read(1) if r else None
+        fd = sys.stdin.fileno()
+        r, _, _ = select.select([fd], [], [], timeout)
+        if not r:
+            return None
+        data = os.read(fd, 64)
+        if data == b"\x1b":  # maybe the start of an escape sequence: give the rest a moment to arrive
+            r, _, _ = select.select([fd], [], [], 0.03)
+            if r:
+                data += os.read(fd, 64)
+        self.pending = self.parse(data.decode("utf-8", "ignore"))
+        return self.pending.pop(0) if self.pending else None
 
 
 # ---------------------------------------------------------------------------
@@ -1168,8 +1280,16 @@ class Dashboard:
         self.paused = False
         self.msg = ""
         self.started = time.time()
+        self.view = "scan"          # "scan" or "guide"
+        self.guide_scroll = 0
+        self.guide_page = 10
+        self.guide_known = set()    # types already found when the guide was opened (for NEW tags)
+        self.dirty = True           # redraw as soon as possible
 
     def render(self, extra=""):
+        self.dirty = False
+        if self.view == "guide":
+            return self.render_guide(extra)
         e = self.e
         cols, rows = shutil.get_terminal_size((120, 40))
         cols = max(cols, 60)
@@ -1180,7 +1300,7 @@ class Dashboard:
                 f"{time.strftime('%H:%M:%S')}")
         L.append(head)
         L.append(f"{GRAY}{__expansion__}{RESET}")
-        keys = "[q]uit [f]eed filter [c]lear feed [p]ause"
+        keys = "[q]uit [e]rror guide [f]eed filter [c]lear feed [p]ause"
         if self.mode.startswith("REPLAY"):
             keys += " [+/-] speed [s]kip gap"
         L.append(f"{GRAY}{keys}{RESET}  {extra}  {YELLOW}{self.msg}{RESET}")
@@ -1261,7 +1381,64 @@ class Dashboard:
         sys.stdout.write(out)
         sys.stdout.flush()
 
+    def render_guide(self, extra=""):
+        e = self.e
+        cols, rows = shutil.get_terminal_size((120, 40))
+        cols = max(cols, 60)
+        errs = sum(c for (sev, t), c in e.types.items() if sev == "ERROR")
+        iss = sum(c for (sev, t), c in e.types.items() if sev == "ISSUE")
+        wrn = sum(c for (sev, t), c in e.types.items() if sev == "WARN")
+        act = sum(1 for f in e.files if f.status(self.live, self.stall) == "ACTIVE")
+        head = [
+            f"{BRIGHT_CYAN}{__title__}{RESET} {GRAY}v{VERSION}{RESET}  {WHITE}ERROR GUIDE{RESET}"
+            f"  {GRAY}({self.mode} still running underneath){RESET}  {time.strftime('%H:%M:%S')}",
+            f"  lines {e.total_lines:,}  files {len(e.files)} (active {act})  "
+            f"{RED}errors {errs:,}{RESET}  {YELLOW}issues {iss:,}{RESET}  {CYAN}warnings {wrn:,}{RESET}  {GRAY}{extra}{RESET}"
+            f"  {YELLOW}{self.msg}{RESET}",
+            f"{GRAY}[e] / [Esc] / [q] back to scan   [Up/Down] or [j/k] scroll   [PgUp/PgDn] or [b/space] page"
+            f"   [Home/End]{RESET}",
+            f"{GRAY}{'-' * min(cols - 1, 110)}{RESET}",
+        ]
+        body = guide_lines(e, max(40, min(cols - 8, 110)), self.guide_known)
+        view = max(3, rows - len(head) - 2)
+        self.guide_page = view - 1
+        top = min(self.guide_scroll, max(0, len(body) - view))
+        self.guide_scroll = top
+        shown = body[top:top + view]
+        more = (f"{GRAY}-- lines {top + 1}-{top + len(shown)} of {len(body)}"
+                + (" (more below) --" if top + view < len(body) else " --") + RESET)
+        L = head + shown + [""] * (view - len(shown)) + [more]
+        out = "\033[H" + "".join(fit(l, cols) + "\033[K\n" for l in L[:rows - 1]) + "\033[J"
+        sys.stdout.write(out)
+        sys.stdout.flush()
+
     def handle_key(self, k):
+        """Returns True if the key was used by the dashboard."""
+        self.dirty = True
+        if self.view == "guide":
+            if k in ("e", "E", "ESC", "q", "Q"):
+                self.view = "scan"
+            elif k in ("DOWN", "j"):
+                self.guide_scroll += 1
+            elif k in ("UP", "k"):
+                self.guide_scroll = max(0, self.guide_scroll - 1)
+            elif k in ("PGDN", " "):
+                self.guide_scroll += self.guide_page
+            elif k in ("PGUP", "b"):
+                self.guide_scroll = max(0, self.guide_scroll - self.guide_page)
+            elif k == "HOME":
+                self.guide_scroll = 0
+            elif k in ("END", "G"):
+                self.guide_scroll = 10 ** 9
+            elif k == "p":
+                self.paused = not self.paused
+                self.msg = "PAUSED" if self.paused else ""
+            return True
+        if k in ("e", "E"):
+            self.view = "guide"
+            self.guide_scroll = 0
+            self.guide_known = set(self.e.types)
+            return True
         if k == "f":
             self.feed_filter = (self.feed_filter + 1) % 3
         elif k == "c":
@@ -1747,12 +1924,12 @@ def run_live(args, cfg):
                         if old is None or (old.gone and (WINDOWS or _ino(p) != old.ino)):
                             fs = engine.add_file(p)
                             engine.event("NOTE", "New assimilation log detected", fs, p)
-                if dash and not dash.paused and time.time() - last_draw > args.refresh:
+                if dash and (dash.dirty or (not dash.paused and time.time() - last_draw > args.refresh)):
                     dash.render()
                     last_draw = time.time()
                 k = keys.get(0 if busy else 0.2)
                 if k:
-                    if k in ("q", "Q"):
+                    if k in ("q", "Q") and not (dash and dash.view == "guide"):
                         break
                     if dash:
                         dash.handle_key(k)
@@ -1892,10 +2069,10 @@ def run_replay(args, cfg):
                     vclock = max(vclock - 1, last_log)  # processing fell behind; don't let a backlog snowball
                 if not heap and not paused:
                     if dash:
-                        dash.msg = "REPLAY COMPLETE - press q to exit"
+                        dash.msg = "REPLAY COMPLETE - press q to exit" if dash.view == "scan" else "REPLAY COMPLETE"
                     else:
                         break
-                if dash and time.time() - last_draw > args.refresh:
+                if dash and (dash.dirty or time.time() - last_draw > args.refresh):
                     sp = "max" if speed <= 0 else f"{speed:g}x"
                     lt = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(last_log)) if last_log else "-"
                     dash.mode = f"REPLAY {sp}"
@@ -1903,9 +2080,11 @@ def run_replay(args, cfg):
                     last_draw = time.time()
                 k = keys.get(0 if (heap and (speed <= 0)) else 0.05)
                 if k:
-                    if k in ("q", "Q"):
+                    if k in ("q", "Q") and not (dash and dash.view == "guide"):
                         break
-                    if k == "+":
+                    if dash and dash.view == "guide" and k not in ("+", "-"):
+                        dash.handle_key(k)
+                    elif k == "+":
                         speed = 2.0 if speed <= 0 else speed * 2
                         speed = 0.0 if speed > 1e6 else speed
                     elif k == "-":
@@ -1962,7 +2141,8 @@ def main(argv=None):
         prog="catalyst",
         description=f"{__fullname__}\nv{__version__} - live monitor & replay for Hammerspace assimilation logs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=SUPPORT_NOTE + "\n\nKeys while running: q quit, f cycle feed filter, c clear feed, p pause, +/- replay speed, "
+        epilog=SUPPORT_NOTE + "\n\nKeys while running: q quit, e error guide (scan keeps running; e/Esc to return), "
+               "f cycle feed filter, c clear feed, p pause, +/- replay speed, "
                "s skip to next record (replay).\nCustom watch items: plain text or re:<regex>; prefix "
                "E: I: W: N: to set severity, e.g.  --add 'E:re:err=(5|28)'")
     ap.add_argument("mode", nargs="?", default="live", choices=["live", "replay", "simulate"])

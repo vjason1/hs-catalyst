@@ -9,6 +9,7 @@ Live monitor and replay tool for Hammerspace assimilation logs (`HS_root.log`). 
 - Runs on **Linux**, the primary platform: the Hammerspace Anvil is Linux-based, and live monitoring of `/pd/assimilation-logs` happens there. Also runs on Windows 10/11 and macOS (see "Platforms" below)
 - Full guide: [`docs/Hammerspace_CATALYST.docx`](https://github.com/vjason1/hs-catalyst/blob/main/docs/Hammerspace_CATALYST.docx) (also importable into Confluence)
 - Source repository: <https://github.com/vjason1/hs-catalyst>
+- Confluence copy of this README: [`docs/README_confluence.docx`](https://github.com/vjason1/hs-catalyst/blob/main/docs/README_confluence.docx) (Import → Word document) or [`docs/README_confluence.md`](https://github.com/vjason1/hs-catalyst/blob/main/docs/README_confluence.md) (Insert → Markup → Markdown)
 
 > **Important:** **Running assimilations require Hammerspace support.** While an assimilation is underway, its log is only on the Anvil (`/pd/assimilation-logs`), which end users can't access. **End users can examine logs of completed assimilations**, which are stored in the `assimilation-logs` folder at the root of each Hammerspace share.
 
@@ -109,7 +110,8 @@ Skipped lines are counted by reason (for example *Skipped - file not seen on the
 
 | Key | Action |
 |---|---|
-| `q` | Quit and show the summary (Ctrl-C also works) |
+| `q` | Quit and show the summary (Ctrl-C also works). In the error guide, `q` returns to the scan instead. |
+| `e` | Open the **error guide** while the scan keeps running (see below). `e` or `Esc` returns to the scan. |
 | `f` | Change the feed filter: all, errors and issues, errors only |
 | `c` | Clear the feed |
 | `p` | Pause |
@@ -130,6 +132,14 @@ python3 catalyst.py -O ~/catalyst-reports -x     # export into ~/catalyst-report
 - `-u` saves, and uploads when stopped without asking.
 
 The upload bundles both files as a `.tar.gz` and POSTs them to the Hammerspace endpoint the same way as `dme-watch.sh`. It uses `curl` if installed, or a built-in HTTP upload otherwise. Override the endpoint with `--upload-url` or `CATALYST_UPLOAD_URL`.
+
+## Error guide (while scanning)
+
+Press **`e`** at any time to swap the dashboard for the error guide. The scan or replay keeps running underneath, and a status line at the top shows live line, error, issue and warning counts.
+
+- **Found in this scan:** every error type found so far, worst severity first, then by count. Each shows its live count, how many files it appeared in, and its explanation. For SID errors, the PowerShell lookups use the most frequent SIDs from the log. Types that first appear while the guide is open are tagged **NEW**. Types with no description yet, and log entries the tool doesn't recognise, are listed with a short note.
+- **Other error types:** the remaining types the tool can explain, not seen in this scan.
+- **Keys:** `Up`/`Down` or `j`/`k` scroll; `PgUp`/`PgDn` or `b`/`space` page; `Home`/`End`. In replay, `+`/`-` still change speed. Press `e`, `Esc` or `q` to return to the scan.
 
 ## What the errors mean
 
@@ -264,6 +274,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.5.2 | `e` opens an error guide while the scan keeps running: types found so far first (live counts, NEW tags, SID lookups), then the other known types. Arrow/Page/Home/End keys. |
 | 2.5.1 | Completed logs shown in their dated folder: `<share>/assimilation-logs/<date-time stamp>/<log>`. |
 | 2.5.0 | Notes that monitoring running assimilations requires Hammerspace support, and that end users examine completed logs in `<share>/assimilation-logs/`. Corrected where finished logs are moved to. |
 | 2.4.9 | Windows support (console colors and fallback, safe file handling, no crashes on unsupported characters). Linux remains the primary platform. |
