@@ -7,13 +7,17 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.4
+  Version  : 2.4.5
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Requires : Python 3.7+ (standard library only; uses curl for upload when
              present, otherwise a built-in HTTP upload)
 
   Changelog
+    2.4.5  2026-10-31  On exit, offers to export a Markdown summary report
+                       (same content as the on-screen summary) and the full
+                       log of every error/issue found (-x DIR does it without
+                       asking). Exported files are included in the upload.
     2.4.4  2026-10-31  Log entries the tool doesn't recognise are kept with
                        all lines of the entry. On exit it offers (default
                        No) to upload them to Hammerspace; if declined, it
@@ -99,7 +103,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.4"
+__version__ = "2.4.5"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -424,7 +428,9 @@ class FileState:
 class Engine:
     """Classifies every line, counts error types, matches watch items, keeps the feed."""
 
-    def __init__(self, watches, match_paths=False, feed_size=3000, matches_csv=None, plain=False):
+    ERRLOG_SEVS = ("ERROR", "ISSUE", "NOTE")
+
+    def __init__(self, watches, match_paths=False, feed_size=3000, matches_csv=None, plain=False, errlog=None):
         self.watches = watches
         self.match_paths = match_paths
         self.files = []
@@ -436,6 +442,19 @@ class Engine:
         self.nobody = 0
         self.ads = 0
         self.feed = collections.deque(maxlen=feed_size)
+        self.errlog_path = errlog
+        self.errlog = None
+        self.errlog_count = 0
+        if errlog:
+            try:
+                self.errlog = open(errlog, "w", encoding="utf-8")
+                self.errlog.write(f"# {__fullname__}\n# v{__version__} - full log of errors and issues"
+                                  f" (ERROR, ISSUE, NOTE; warnings are counted in the summary only)\n"
+                                  f"# Host: {HOST}   Started: {time.strftime('%a %b %d %H:%M:%S %Z %Y')}\n"
+                                  f"# Format: <log time>  <severity>  <type>  <log file>:<line>  path=<affected path>\n"
+                                  f"#         followed by the log line itself, indented\n\n")
+            except OSError:
+                self.errlog = None
         self.unknown = collections.OrderedDict()  # type -> {"count": n, "examples": [(path, line, [lines])]}
         self.total_lines = 0
         self.total_bytes = 0
@@ -602,6 +621,8 @@ class Engine:
             self.types[cls] += 1
             fs.types[cls] += 1
             self.type_files[cls].add(fs.idx)
+            if self.errlog and cls[0] in self.ERRLOG_SEVS:
+                self._errlog_write(fs.last_ts, cls[0], cls[1], f"{fs.path}:{fs.lineno}", fs.cur_path, line.strip())
             if cls[0] == "NOTE" and fs.rec_unknown is None:
                 fs.rec_unknown = cls[1]
                 fs.rec_unknown_idx = len(fs.rec) - 1
@@ -650,8 +671,18 @@ class Engine:
                     u["examples"].append((fs.path, fs.rec_start, list(fs.rec), fs.rec_unknown_idx))
         fs.rec_unknown = None
 
+    def _errlog_write(self, ts, sev, typ, where, path, text):
+        try:
+            tstr = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts)) if ts else "-"
+            self.errlog.write(f"{tstr}  {sev:5s}  {typ}  {where}  path={path or '-'}\n    {text}\n")
+            self.errlog_count += 1
+        except (OSError, ValueError):
+            self.errlog = None
+
     def event(self, sev, typ, fs, text):
         tstr = time.strftime("%Y-%m-%d %H:%M:%S")
+        if self.errlog and sev in self.ERRLOG_SEVS:
+            self._errlog_write(time.time(), sev, typ + " (monitor)", fs.path, fs.path, text)
         self.feed.append((tstr, fs.name, sev, typ, fs.path, text, "monitor", fs.lineno, fs.path))
         if self.plain:
             self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name} {typ} | {text}")
@@ -671,6 +702,11 @@ class Engine:
     def close(self):
         if self.csv:
             self.csv[0].close()
+        if self.errlog:
+            try:
+                self.errlog.close()
+            except OSError:
+                pass
 
     # -- highlights --------------------------------------------------------
     def highlights(self, live, stall_secs):
@@ -728,7 +764,7 @@ class Engine:
                 else:
                     out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"))
             if fs.ads:
-                out.append(("WARN", f"{fs.name}: {fs.ads:,} files had alternate data streams that were NOT"
+                out.append(("WARN", f"{fs.name}: {fs.ads:,} file{'s' if fs.ads != 1 else ''} had alternate data streams that were NOT"
                                     f" assimilated (macOS resource forks / Windows ADS lost)"))
         unk = sum(c for (sev, t), c in self.types.items() if sev == "NOTE")
         if unk:
@@ -1083,6 +1119,119 @@ def summary_text(engine, live, stall, color=True):
     return "\n".join(out)
 
 
+def _md(text):
+    return str(text).replace("|", "\\|")
+
+
+def summary_markdown(engine, live, stall, args=None):
+    """The exit summary as Markdown (same content as the on-screen summary)."""
+    sevs = {"ERROR": "🔴 ERROR", "ISSUE": "🟠 ISSUE", "NOTE": "🟣 NOTE", "WARN": "🔵 WARN", "INFO": "INFO"}
+    out = [f"# {__title__} summary", "",
+           f"*{__expansion__}*", "",
+           "| | |", "|---|---|",
+           f"| Version | {__version__} |",
+           f"| Host | {HOST} |",
+           f"| Mode | {'Live' if live else 'Replay'} |",
+           f"| Source | `{_md(getattr(args, 'source_root', '') or '-')}` |",
+           f"| Generated | {time.strftime('%Y-%m-%d %H:%M:%S %Z')} |",
+           f"| Files | {len(engine.files)} |",
+           f"| Lines read | {engine.total_lines:,} |", ""]
+    hl = engine.highlights(live, stall)
+    out += ["## Highlights", ""]
+    out += [f"- **{sev}** {_md(t)}" for sev, t in hl] if hl else ["No problems highlighted."]
+    out += ["", "## Files", "",
+            "| Status | File | Items | Issues | Errors | Warnings | Elapsed |",
+            "|---|---|--:|--:|--:|--:|--:|"]
+    for f in engine.files:
+        el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
+        out.append(f"| {f.status(live, stall)} | `{_md(f.path)}` | {f.items:,} | {f.issues:,} | {f.errors:,} "
+                   f"| {f.warns:,} | {fmt_dur(el)} |")
+    out += ["", "## Count by type (all files)", ""]
+    if engine.types:
+        out += ["| Severity | Count | Type | Files |", "|---|--:|---|--:|"]
+        for (sev, t), n in sorted(engine.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1])):
+            out.append(f"| {sevs[sev]} | {n:,} | {_md(t)} | {len(engine.type_files[(sev, t)])} |")
+    else:
+        out.append("No errors, issues or warnings.")
+    if engine.watches:
+        out += ["", "## Watch items", "", "| Severity | Hits | Item |", "|---|--:|---|"]
+        out += [f"| {sevs[w.sev]} | {w.hits:,} | `{_md(w.label.strip())}` |" for w in engine.watches]
+    if engine.sids:
+        out += ["", "## Top unmapped SIDs (ACE dropped)", "", "| Count | SID |", "|--:|---|"]
+        out += [f"| {n:,} | `{sid}` |" for sid, n in engine.sids.most_common(8)]
+    out += ["", "## Per file", ""]
+    for f in engine.files:
+        el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
+        imp = ", ".join(f"{k}={v:,}" for k, v in f.imported.most_common())
+        out += [f"### `{_md(f.path)}`", "",
+                f"- Status: **{f.status(live, stall)}**, elapsed {fmt_dur(el)}",
+                f"- Items {f.items:,} · issues {f.issues:,} · errors {f.errors:,} · warnings {f.warns:,}",
+                f"- Imported by type: {imp or '-'}", ""]
+        if f.types:
+            out += ["| Severity | Count | Type |", "|---|--:|---|"]
+            out += [f"| {sevs[sev]} | {n:,} | {_md(t)} |"
+                    for (sev, t), n in sorted(f.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1]))]
+            out.append("")
+    if engine.unknown:
+        out += ["## Log entries not recognised", ""]
+        out += [f"- {u['count']:,} × {_md(t)}" for t, u in engine.unknown.items()]
+        out.append("")
+    return "\n".join(out) + "\n"
+
+
+def errlog_temp_path():
+    # tidy up temp logs left by runs that were killed (older than a day)
+    try:
+        for fn in os.listdir(SAVE_DIR):
+            if fn.startswith(".catalyst_") and fn.endswith("_errors.tmp"):
+                fp = os.path.join(SAVE_DIR, fn)
+                if time.time() - os.path.getmtime(fp) > 86400:
+                    os.remove(fp)
+    except OSError:
+        pass
+    return os.path.join(SAVE_DIR, f".catalyst_{HOST}_{RUN_STAMP}_{os.getpid()}_errors.tmp")
+
+
+def _export(engine, args, live):
+    """Offer (or, with -x, just do) export of the Markdown summary + full error log."""
+    tmp = engine.errlog_path
+    target = args.export
+    if target is None and sys.stdin.isatty() and not args.no_prompt:
+        print("-" * 69)
+        a = ask(f"Export a Markdown summary report and the full log of all {engine.errlog_count:,} errors/issues?"
+                f" (y/N)", "n")
+        if a.lower().startswith("y"):
+            target = ask("Folder to write them to", os.getcwd())
+    if not target:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+        return []
+    target = os.path.abspath(os.path.expanduser(target))
+    try:
+        os.makedirs(target, exist_ok=True)
+    except OSError as e:
+        print(f"{RED}Can't create {target}: {e}{RESET}")
+        return []
+    base = os.path.join(target, f"catalyst_{HOST}_{RUN_STAMP}")
+    md_path, err_path = base + "_summary.md", base + "_errors.log"
+    written = []
+    try:
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(summary_markdown(engine, live, args.stall_secs, args))
+        written.append(md_path)
+        print(f"Summary report (Markdown): {md_path}")
+    except OSError as e:
+        print(f"{RED}Couldn't write {md_path}: {e}{RESET}")
+    if tmp and os.path.exists(tmp):
+        try:
+            shutil.move(tmp, err_path)
+            written.append(err_path)
+            print(f"Full error log ({engine.errlog_count:,} entries): {err_path}")
+        except OSError as e:
+            print(f"{RED}Couldn't write {err_path}: {e}{RESET}")
+    return written
+
+
 def capture_paths():
     base = f"catalyst_{HOST}_{RUN_STAMP}"
     return (os.path.join(SAVE_DIR, base + "_report.txt"),
@@ -1171,6 +1320,9 @@ def finish(engine, args, live):
         print(f"\nReport written to {args.report}")
     if args.matches_csv:
         print(f"Matched lines written to {args.matches_csv}")
+    for fs in engine.files:
+        engine.flush_entry(fs)
+    args.exported = _export(engine, args, live)
     if args.save:
         _capture_upload(engine, args)
     _offer_unknown(engine, args, live)
@@ -1188,7 +1340,7 @@ def _capture_upload(engine, args):
         print("-" * 69)
         upload = ask("Do you want to upload this capture to Hammerspace? (y/n)", "n").lower().startswith("y")
     if upload:
-        do_upload([args.report, args.matches_csv], args.upload_url)
+        do_upload([args.report, args.matches_csv] + list(getattr(args, "exported", [])), args.upload_url)
     else:
         print(f"Upload skipped. Files remain at {args.report}" + (f" and {args.matches_csv}" if args.matches_csv else ""))
 
@@ -1239,7 +1391,7 @@ def _offer_unknown(engine, args, live):
         print(f"Saved with the lines of each entry to: {path}")
 
     send = False
-    if sys.stdin.isatty():
+    if sys.stdin.isatty() and not args.no_prompt:
         send = ask("Send these entries to Hammerspace so the tool can learn them? (y/N)", "n").lower().startswith("y")
     if send and path:
         tarball = os.path.join(SAVE_DIR, f"catalyst_unknown_{HOST}_{RUN_STAMP}.tar.gz")
@@ -1302,7 +1454,8 @@ def run_live(args, cfg):
     args.source_root = root
     setup_save(args)
 
-    engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain)
+    engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain,
+                    errlog=errlog_temp_path())
     files = discover(root, pattern)
     for p in files:
         fs = engine.add_file(p)
@@ -1437,7 +1590,8 @@ def run_replay(args, cfg):
     args.source_root = ", ".join(files)
     setup_save(args)
 
-    engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain)
+    engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain,
+                    errlog=errlog_temp_path())
     states = [engine.add_file(p) for p in files]
     streams = [record_stream(fs, engine) for fs in states]
     heap = []
@@ -1571,7 +1725,7 @@ def main(argv=None):
     ap.add_argument("-g", "--glob", default=None, help=f"file name pattern(s), comma-separated; default {DEFAULT_FILE_GLOB}")
     ap.add_argument("-s", "--select", help="watch items to enable: 'all', 'none', 'default', or e.g. 1-5,8")
     ap.add_argument("-a", "--add", action="append", help="custom watch item (repeatable)")
-    ap.add_argument("-y", "--no-prompt", action="store_true", help="don't ask anything; use defaults/saved choices")
+    ap.add_argument("-y", "--no-prompt", action="store_true", help="don't ask anything (incl. exit questions); use defaults/saved choices, -x / -u to export or upload")
     ap.add_argument("--files", help="(replay) which discovered files, e.g. 1,3 or all")
     ap.add_argument("--speed", type=_speed_arg, help="(replay/simulate) speed multiplier; 0 or max = as fast as possible")
     ap.add_argument("--max-gap", type=float, default=5.0, help="(replay) compress idle gaps longer than this many seconds")
@@ -1588,6 +1742,9 @@ def main(argv=None):
     ap.add_argument("--plain", action="store_true", help="no dashboard; print matching lines like grep, summary at end")
     ap.add_argument("--report", help="write the final summary to this text file")
     ap.add_argument("--matches-csv", help="write every matched line to this CSV")
+    ap.add_argument("-x", "--export", nargs="?", const=".", metavar="DIR",
+                    help="on exit, write a Markdown summary + full error log to DIR (default: current folder)"
+                         " without asking")
     ap.add_argument("-o", "--save", action="store_true",
                     help=f"save captured errors + summary to {SAVE_DIR}/catalyst_<host>_<timestamp>_*")
     ap.add_argument("-u", "--upload", action="store_true",

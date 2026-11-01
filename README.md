@@ -97,6 +97,23 @@ Skipped lines are counted by reason (for example *Skipped - file not seen on the
 
 The upload bundles both files as a `.tar.gz` and POSTs them to the Hammerspace endpoint the same way as `dme-watch.sh`. It uses `curl` if installed, or a built-in HTTP upload otherwise. Override the endpoint with `--upload-url` or `CATALYST_UPLOAD_URL`.
 
+## Exporting a report
+
+When you quit, the summary is printed on screen and you're asked:
+
+```
+Export a Markdown summary report and the full log of all N errors/issues? (y/N)
+```
+
+If you answer **y**, it asks for a folder (default: the current folder) and writes:
+
+| File | Contents |
+|---|---|
+| `catalyst_<host>_<timestamp>_summary.md` | The exit summary in Markdown: highlights, files, count by type, watch items, top unmapped SIDs, per-file breakdown, and any log entries not recognised |
+| `catalyst_<host>_<timestamp>_errors.log` | Every ERROR, ISSUE and NOTE line found, each with log time, severity, type, log file and line number, affected path, and the original log line. Warnings are counted in the summary but not listed, since logs can have millions of them. |
+
+Use `-x [DIR]` to export without being asked (default folder: the current one). If you're also saving with `-o` / `-u`, the exported files are included in the upload bundle.
+
 ## Log entries the tool doesn't recognise
 
 If a log contains an entry C.A.T.A.L.Y.S.T. doesn't recognise, it appears in the feed as a NOTE and in the highlights. Each one is kept with every line of its log entry (the timestamp line plus its indented detail lines). Up to 3 examples of each kind are kept.
@@ -115,6 +132,7 @@ Send these entries to Hammerspace so the tool can learn them? (y/N)
 ```bash
 python3 catalyst.py -o                                    # watch, save, ask about upload at the end
 python3 catalyst.py -y -u                                 # unattended, upload on exit
+python3 catalyst.py -x ~/reports                          # export Markdown summary + error log on exit
 python3 catalyst.py -d /shares/finance                    # watch a share with finished logs
 python3 catalyst.py replay -d ./logs --speed 20           # replay at 20x
 python3 catalyst.py replay -y -d ./logs --speed max \
@@ -135,6 +153,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.4.5 | On exit, offers to export a Markdown summary report and the full log of every error/issue (`-x DIR` to export without asking). Exports are included in the upload. |
 | 2.4.4 | Log entries the tool doesn't recognise are kept with the lines of each entry. On exit you're offered to upload them (default No); otherwise you're asked to email them. |
 | 2.4.3 | Watch items 15–16 for files skipped by SMB (not seen on the SMB side / existence denied), on by default, with counts by reason and highlights. |
 | 2.4.2 | Live mode watches `/pd/assimilation-logs` by default. Accepts a folder, log file, or file name. Handles logs moved at completion (`MOVED`) or removed early (`VANISHED`). |
