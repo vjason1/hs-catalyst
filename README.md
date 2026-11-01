@@ -66,6 +66,8 @@ At startup, choose which items feed the live list of items of concern (`--select
 | 12 | Unmapped SID, ACE dropped | WARN | off |
 | 13 | Unmapped user/group SID, owner fallback | WARN | off |
 | 14 | Owner mapped to nobody (uid 65534) | WARN | off |
+| 15 | `Skipped "…" because file not seen on the SMB side` | ISSUE | on |
+| 16 | `Skipped "…" because existence denied by SMB server` | ISSUE | on |
 
 Add your own with `--add` (repeatable). Use plain text or `re:<regex>`, optionally starting with `E:` / `I:` / `W:` / `N:` to set the severity:
 
@@ -74,6 +76,8 @@ python3 catalyst.py --add 'E:re:err=(5|28)' --add 'W:Stale file handle'
 ```
 
 Text inside imported file and folder names is ignored unless you pass `--match-paths`.
+
+Skipped lines are counted by reason (for example *Skipped - file not seen on the SMB side*), the skipped file's path is shown in the feed, and each reason gets a highlight. New items in an upgrade start at their default, even if you saved a selection with an earlier version.
 
 ## Keys
 
@@ -118,5 +122,6 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
-| 2.4.2 | Live mode watches `/pd/assimilation-logs` by default. Accepts a folder, log file, or file name. Handles logs moved at completion (`MOVED`) or removed early (`VANISHED`). `--speed max` fixed. |
+| 2.4.3 | Watch items 15–16 for files skipped by SMB (not seen on the SMB side / existence denied), on by default, with counts by reason and highlights. |
+| 2.4.2 | Live mode watches `/pd/assimilation-logs` by default. Accepts a folder, log file, or file name. Handles logs moved at completion (`MOVED`) or removed early (`VANISHED`). |
 | 2.4.1 | Initial release |

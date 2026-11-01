@@ -7,13 +7,20 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.4.2
+  Version  : 2.4.3
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Requires : Python 3.7+ (standard library only; uses curl for upload when
              present, otherwise a built-in HTTP upload)
 
   Changelog
+    2.4.3  2026-10-31  New watch items 15-16 (on by default):
+                         Skipped "..." because file not seen on the SMB side
+                         Skipped "..." because existence denied by SMB server
+                       Skipped lines are counted by reason, show the skipped
+                       path in the feed, and raise highlights. Saved
+                       selections from older versions get new items at their
+                       default. --speed accepts max / 20x.
     2.4.2  2026-10-29  Live default is the Anvil's /pd/assimilation-logs (one
                        <date-time>/HS_root.log per running assimilation).
                        Target may be a folder, a log file, or a log file name;
@@ -88,7 +95,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.4.2"
+__version__ = "2.4.3"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -162,6 +169,10 @@ PRESETS = [
     ("Unmapped SID -> ACE dropped", "sub", "so ACE dropped", "WARN", False, "samples"),
     ("Unmapped User/Group SID -> owner fallback", "re", r"Could not map (?:User|Group) SID", "WARN", False, "samples"),
     ("Owner mapped to nobody (uid 65534)", "sub", "uid=65534(", "WARN", False, "samples"),
+    ('Skipped "..." because file not seen on the SMB side', "re",
+     r'Skipped ".*" because file not seen on the SMB side', "ISSUE", True, "requested"),
+    ('Skipped "..." because existence denied by SMB server', "re",
+     r'Skipped ".*" because existence denied by SMB server', "ISSUE", True, "requested"),
 ]
 
 
@@ -241,7 +252,11 @@ def save_config(cfg):
 
 def choose_watches(args, cfg):
     saved_sel = cfg.get("selected")
-    defaults = [i for i, p in enumerate(PRESETS) if (p[0] in saved_sel if saved_sel is not None else p[4])]
+    known = cfg.get("known")  # preset labels that existed when the selection was saved
+    if saved_sel is not None and known is None:
+        known = [p[0] for p in PRESETS[:14]]  # configs saved by v2.4.2 or earlier
+    defaults = [i for i, p in enumerate(PRESETS)
+                if (p[0] in saved_sel if (saved_sel is not None and p[0] in known) else p[4])]
     customs = list(cfg.get("custom", []))
 
     if args.select is not None:
@@ -251,10 +266,10 @@ def choose_watches(args, cfg):
     elif args.no_prompt:
         sel = defaults
     else:
-        print(f"\n{WHITE}WATCH ITEMS{RESET}  {GRAY}(* = from your grep, + = found in the sample logs){RESET}")
+        print(f"\n{WHITE}WATCH ITEMS{RESET}  {GRAY}(* = requested by you, + = found in the sample logs){RESET}")
         for i, (label, kind, pat, sev, _on, origin) in enumerate(PRESETS):
             mark = f"{GREEN}[x]{RESET}" if i in defaults else "[ ]"
-            tag = "*" if origin == "your grep" else "+"
+            tag = "+" if origin == "samples" else "*"
             print(f"  {mark} {i + 1:2d} {tag} {SEV_COLOR[sev]}{sev:5s}{RESET}  {label}")
         print(f"{GRAY}  Note: your grep items use 'error= ' / 'err= ' with a space; the sample logs write"
               f" error=\"...\" and err=13,\n  so items 6-7 catch those. Text inside imported file names is ignored"
@@ -290,6 +305,7 @@ def choose_watches(args, cfg):
     watches = [Watch(PRESETS[i][0], PRESETS[i][1], PRESETS[i][2], PRESETS[i][3], PRESETS[i][5]) for i in sel]
     watches += [parse_custom(s) for s in customs]
     cfg["selected"] = [PRESETS[i][0] for i in sel]
+    cfg["known"] = [p[0] for p in PRESETS]
     cfg["custom"] = customs
     return watches
 
@@ -372,6 +388,7 @@ class FileState:
         self.sids = collections.Counter()
         self.nobody = 0
         self.ads = 0
+        self.skips = collections.Counter()  # skip reason -> count
         self.fh = None        # kept open so we can finish reading after the log is moved/deleted
         self.gone = False     # path no longer points at this log (moved into share / deleted)
 
@@ -423,11 +440,32 @@ class Engine:
         return fs
 
     # -- classification --------------------------------------------------
+    SKIP_REASONS = {
+        "file not seen on the SMB side": "Skipped - file not seen on the SMB side",
+        "existence denied by SMB server": "Skipped - existence denied by SMB server",
+    }
+
+    def _skipped(self, fs, text):
+        """'Skipped "<path>" because <reason>' -> ISSUE typed by reason; None if not a skip line."""
+        if not text.startswith('Skipped "'):
+            return None
+        end = text.rfind('" because ')
+        if end < 0:
+            fs.issues += 1
+            return ("ISSUE", "Skipped: " + normalize(text[8:], 45))
+        fs.cur_path = text[9:end]
+        reason = text[end + 10:].strip().rstrip(".")
+        fs.issues += 1
+        fs.skips[reason] += 1
+        return ("ISSUE", self.SKIP_REASONS.get(reason, "Skipped - " + normalize(reason, 50)))
+
     def _classify(self, fs, line):
         """Return (severity, type) or None for routine lines; updates per-file context."""
         c0 = line[:1]
         if c0 == " " or c0 == "\t":
             s = line.lstrip()
+            if s.startswith('Skipped "'):
+                return self._skipped(fs, s)
             if s.startswith('warning msg="'):
                 fs.warns += 1
                 if s.endswith('so ACE dropped."'):
@@ -494,6 +532,8 @@ class Engine:
                     if i > 0:
                         fs.dir_paths[body[i + 5:body.find(" ", i + 5)]] = fs.cur_path
                 return None
+            if body.startswith('Skipped "'):
+                return self._skipped(fs, body)
             if body.startswith('Issues during import of "'):
                 fs.issues += 1
                 end = body.find('" into dir ')
@@ -519,6 +559,8 @@ class Engine:
             if ts:
                 fs.last_ts = ts
             return None
+        if line.startswith('Skipped "'):
+            return self._skipped(fs, line)
         if line.startswith("Error importing directory contents"):
             fs.errors += 1
             ino = line.rsplit("=", 1)[-1].strip()
@@ -639,6 +681,16 @@ class Engine:
                 if pct >= 5:
                     out.append(("ISSUE" if pct >= 25 else "WARN",
                                 f"{fs.name}: {fs.nobody:,} items (~{pct}%) now owned by uid 65534 (nobody)"))
+            for reason, n in fs.skips.most_common():
+                if reason == "file not seen on the SMB side":
+                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - not seen on the SMB side (present over NFS"
+                                         f" but not visible through SMB; check SMB share path, vetoed/hidden files, name"
+                                         f" characters SMB can't show)"))
+                elif reason == "existence denied by SMB server":
+                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - existence denied by SMB server (check SMB"
+                                         f" share/ACL permissions for the account used by the assimilation)"))
+                else:
+                    out.append(("ISSUE", f"{fs.name}: {n:,} file{'s' if n != 1 else ''} skipped - {reason}"))
             if fs.ads:
                 out.append(("WARN", f"{fs.name}: {fs.ads:,} files had alternate data streams that were NOT"
                                     f" assimilated (macOS resource forks / Windows ADS lost)"))
