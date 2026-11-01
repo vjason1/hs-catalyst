@@ -7,7 +7,7 @@ Hammerspace C.A.T.A.L.Y.S.T.
   Name     : Hammerspace C.A.T.A.L.Y.S.T. - Continuous Assimilation Tracker
              And Logic for Yield, Storage, & Targeted Analysis
   File     : catalyst.py
-  Version  : 2.5.3
+  Version  : 2.5.4
   Author   : Jason Ventresco
   Created  : 2026-10-29
   Platform : Linux - the Hammerspace Anvil is Linux-based, and that is where
@@ -19,6 +19,13 @@ Hammerspace C.A.T.A.L.Y.S.T.
              HTTP upload)
 
   Changelog
+    2.5.4  2026-11-01  Exports: a Markdown summary and full error log per
+                       share (plus an all-shares overview). "v" switches the
+                       dashboard between the file list and per-share panels
+                       (up to 5). Outside the Anvil folder, at most 5 logs are
+                       scanned at a time; each finished log is renamed to
+                       <name>-scanned before the next starts (--no-rename to
+                       skip). Replay also plays at most 5 logs at a time.
     2.5.3  2026-11-01  Share id (from "Assimilation started for share=N")
                        shown wherever results from several logs appear:
                        FILES table, count by type and error guide (which
@@ -158,7 +165,7 @@ CONFIG_PATH = os.path.expanduser("~/.catalyst.json")
 __title__ = "Hammerspace C.A.T.A.L.Y.S.T."
 __expansion__ = "Continuous Assimilation Tracker And Logic for Yield, Storage, & Targeted Analysis"
 __fullname__ = f"{__title__} - {__expansion__}"
-__version__ = "2.5.3"
+__version__ = "2.5.4"
 __date__ = "2026-10-29"
 VERSION = __version__
 
@@ -167,6 +174,10 @@ UPLOAD_URL = os.environ.get("CATALYST_UPLOAD_URL", "https://v1proto.sc.hammerspa
 UPLOAD_FIELDS = {"payload": "prosvcs", "cluster_id": "manual", "payload_type": "prosvcs"}
 # Where to send unrecognised log entries if they choose not to upload them.
 REPORT_EMAIL = "jason.ventresco@hammerspace.com"
+MAX_CONCURRENT_LOGS = 5     # Hammerspace runs at most 5 assimilations at once; scans/replays outside
+                            # the Anvil folder process at most this many logs at a time
+SCANNED_SUFFIX = "-scanned"  # appended to a log's name once it has been scanned (outside the Anvil folder)
+SETTLE_SECS = 10            # an incomplete log idle this long at end-of-file counts as fully scanned
 UNKNOWN_MAX_TYPES = 200      # distinct unrecognised entry types kept
 UNKNOWN_MAX_EXAMPLES = 3     # examples kept per type
 UNKNOWN_MAX_LINES = 50       # lines kept per example entry
@@ -651,6 +662,11 @@ class FileState:
         self.rec_start = 0      # line number where the current entry starts
         self.rec_unknown = None  # unrecognised type found in the current entry, if any
         self.rec_unknown_idx = 0
+        self.user_sids = collections.Counter()
+        self.group_sids = collections.Counter()
+        self.watch_hits = collections.Counter()   # watch label -> hits in this log
+        self.scanned = False   # finished and (outside the Anvil folder) renamed to *-scanned
+        self.renamed_to = None
         self.share = None     # share id from the "Assimilation started for share=N obsid=M" header
         self.obsid = None
         self.fh = None        # kept open so we can finish reading after the log is moved/deleted
@@ -669,7 +685,13 @@ class FileState:
         """File name plus share id, used wherever several logs are shown together."""
         return f"{self.name} [{self.share_label}]"
 
+    @property
+    def share_key(self):
+        return self.share or "unknown"
+
     def status(self, live, stall_secs):
+        if self.scanned:
+            return "SCANNED" if self.completed else "INCOMPLETE"
         if self.completed:
             return "MOVED" if (live and self.gone) else "COMPLETE"
         if live and self.gone:
@@ -700,19 +722,8 @@ class Engine:
         self.nobody = 0
         self.ads = 0
         self.feed = collections.deque(maxlen=feed_size)
-        self.errlog_path = errlog
-        self.errlog = None
-        self.errlog_count = 0
-        if errlog:
-            try:
-                self.errlog = open(errlog, "w", encoding="utf-8")
-                self.errlog.write(f"# {__fullname__}\n# v{__version__} - full log of errors and issues"
-                                  f" (ERROR, ISSUE, NOTE; warnings are counted in the summary only)\n"
-                                  f"# Host: {HOST}   Started: {time.strftime('%a %b %d %H:%M:%S %Z %Y')}\n"
-                                  f"# Format: <log time>  <severity>  <type>  share <id>  <log file>:<line>  path=<affected path>\n"
-                                  f"#         followed by the log line itself, indented\n\n")
-            except OSError:
-                self.errlog = None
+        self.errlog_base = errlog   # temp path prefix; one error log per share is streamed from it
+        self.errlogs = {}           # share key -> {"path", "fh", "count"}
         self.unknown = collections.OrderedDict()  # type -> {"count": n, "examples": [(path, line, [lines])]}
         self.total_lines = 0
         self.total_bytes = 0
@@ -801,10 +812,12 @@ class Engine:
                 if s.startswith('warning msg="Could not map User SID'):
                     i = s.find('SID="') + 5
                     self.user_sids[s[i:s.find('"', i)]] += 1
+                    fs.user_sids[s[i:s.find('"', i)]] += 1
                     return ("WARN", "Unmapped user SID - owner id fallback")
                 if s.startswith('warning msg="Could not map Group SID'):
                     i = s.find('SID="') + 5
                     self.group_sids[s[i:s.find('"', i)]] += 1
+                    fs.group_sids[s[i:s.find('"', i)]] += 1
                     return ("WARN", "Unmapped group SID - group id fallback")
                 if "alternate stream" in s:
                     self.ads += 1
@@ -917,8 +930,8 @@ class Engine:
             self.types[cls] += 1
             fs.types[cls] += 1
             self.type_files[cls].add(fs.idx)
-            if self.errlog and cls[0] in self.ERRLOG_SEVS:
-                self._errlog_write(fs.last_ts, cls[0], cls[1], f"{fs.share_label}  {fs.path}:{fs.lineno}", fs.cur_path, line.strip())
+            if self.errlog_base and cls[0] in self.ERRLOG_SEVS:
+                self._errlog_write(fs, fs.last_ts, cls[0], cls[1], f"{fs.share_label}  {fs.path}:{fs.lineno}", fs.cur_path, line.strip())
             if cls[0] == "NOTE" and fs.rec_unknown is None:
                 fs.rec_unknown = cls[1]
                 fs.rec_unknown_idx = len(fs.rec) - 1
@@ -935,6 +948,7 @@ class Engine:
                         if not w.match(stripped):
                             continue
                     w.hits += 1
+                    fs.watch_hits[w.label] += 1
                     if hits is None:
                         hits = [w]
                     else:
@@ -960,25 +974,50 @@ class Engine:
         if t is not None:
             u = self.unknown.get(t)
             if u is None and len(self.unknown) < UNKNOWN_MAX_TYPES:
-                u = self.unknown[t] = {"count": 0, "examples": []}
+                u = self.unknown[t] = {"count": 0, "examples": [], "by_share": collections.Counter()}
             if u is not None:
                 u["count"] += 1
+                u["by_share"][fs.share_key] += 1
                 if len(u["examples"]) < UNKNOWN_MAX_EXAMPLES:
                     u["examples"].append((fs.path, fs.rec_start, list(fs.rec), fs.rec_unknown_idx, fs.share_label))
         fs.rec_unknown = None
 
-    def _errlog_write(self, ts, sev, typ, where, path, text):
+    @property
+    def errlog_count(self):
+        return sum(v["count"] for v in self.errlogs.values())
+
+    def _errlog_for(self, fs):
+        key = fs.share_key
+        ent = self.errlogs.get(key)
+        if ent is None:
+            path = f"{self.errlog_base}_share{key}.tmp"
+            try:
+                fh = open(path, "w", encoding="utf-8")
+                fh.write(f"# {__fullname__}\n# v{__version__} - full log of errors and issues for share {key}"
+                         f" (ERROR, ISSUE, NOTE; warnings are counted in the summary only)\n"
+                         f"# Host: {HOST}   Started: {time.strftime('%a %b %d %H:%M:%S %Z %Y')}\n"
+                         f"# Format: <log time>  <severity>  <type>  share <id>  <log file>:<line>  path=<affected path>\n"
+                         f"#         followed by the log line itself, indented\n\n")
+            except OSError:
+                fh = None
+            ent = self.errlogs[key] = {"path": path, "fh": fh, "count": 0}
+        return ent
+
+    def _errlog_write(self, fs, ts, sev, typ, where, path, text):
+        ent = self._errlog_for(fs)
+        if not ent["fh"]:
+            return
         try:
             tstr = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts)) if ts else "-"
-            self.errlog.write(f"{tstr}  {sev:5s}  {typ}  {where}  path={path or '-'}\n    {text}\n")
-            self.errlog_count += 1
+            ent["fh"].write(f"{tstr}  {sev:5s}  {typ}  {where}  path={path or '-'}\n    {text}\n")
+            ent["count"] += 1
         except (OSError, ValueError):
-            self.errlog = None
+            ent["fh"] = None
 
     def event(self, sev, typ, fs, text):
         tstr = time.strftime("%Y-%m-%d %H:%M:%S")
-        if self.errlog and sev in self.ERRLOG_SEVS:
-            self._errlog_write(time.time(), sev, typ + " (monitor)", f"{fs.share_label}  {fs.path}", fs.path, text)
+        if self.errlog_base and sev in ("ERROR", "ISSUE"):  # monitor notices (scanning/renamed) aren't errors
+            self._errlog_write(fs, time.time(), sev, typ + " (monitor)", f"{fs.share_label}  {fs.path}", fs.path, text)
         self.feed.append((tstr, fs.name, sev, typ, fs.path, text, "monitor", fs.lineno, fs.path))
         if self.plain:
             self._say(f"{tstr} {SEV_COLOR[sev]}{sev:5s}{RESET} {fs.name} [{fs.share_label}] {typ} | {text}")
@@ -998,9 +1037,10 @@ class Engine:
     def close(self):
         if self.csv:
             self.csv[0].close()
-        if self.errlog:
+        for ent in self.errlogs.values():
             try:
-                self.errlog.close()
+                if ent["fh"]:
+                    ent["fh"].close()
             except OSError:
                 pass
 
@@ -1064,6 +1104,51 @@ class Engine:
                                 f" you'll be offered to send them to Hammerspace when you quit"))
         out.sort(key=lambda x: SEV_RANK[x[0]])
         return out
+
+
+class ShareView:
+    """The results for one share, shaped like Engine so the summary/report code can run on it."""
+
+    def __init__(self, engine, share_key):
+        self.share = share_key
+        self.label = "share ?" if share_key == "unknown" else f"share {share_key}"
+        self.files = [f for f in engine.files if f.share_key == share_key]
+        self.types = collections.Counter()
+        self.type_files = collections.defaultdict(set)
+        self.sids, self.user_sids, self.group_sids = (collections.Counter() for _ in range(3))
+        for f in self.files:
+            for k, n in f.types.items():
+                self.types[k] += n
+                self.type_files[k].add(f.idx)
+            self.sids.update(f.sids)
+            self.user_sids.update(f.user_sids)
+            self.group_sids.update(f.group_sids)
+        self.sid_perm = engine.sid_perm
+        self.total_lines = sum(f.lineno for f in self.files)
+        self.watches = [types_ns(label=w.label, sev=w.sev, hits=sum(f.watch_hits[w.label] for f in self.files))
+                        for w in engine.watches]
+        self.unknown = collections.OrderedDict()
+        for t, u in engine.unknown.items():
+            n = u.get("by_share", {}).get(share_key, 0)
+            if n:
+                self.unknown[t] = {"count": n, "examples": [ex for ex in u["examples"] if ex[4] == self.label]}
+
+    highlights = Engine.highlights
+
+    def shares_for(self, key):
+        n = len(self.type_files.get(key, ()))
+        return self.label + (f" · {n} logs" if n > 1 else "")
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)
+
+
+def share_keys(engine):
+    """Share keys in a stable order: numeric ids ascending, unknown last."""
+    keys = {f.share_key for f in engine.files}
+    return sorted(keys, key=lambda k: (k == "unknown", int(k) if k.isdigit() else 0, k))
 
 
 # ---------------------------------------------------------------------------
@@ -1323,6 +1408,10 @@ def fit(s, width):
     return "".join(out) + RESET
 
 
+STATUS_COLOR = {"COMPLETE": GREEN, "MOVED": GREEN, "SCANNED": GREEN, "ACTIVE": CYAN, "STALLED": RED,
+                "INCOMPLETE": RED, "VANISHED": RED}
+
+
 class Dashboard:
     def __init__(self, engine, mode, root, live, stall_secs):
         self.e, self.mode, self.root, self.live, self.stall = engine, mode, root, live, stall_secs
@@ -1330,7 +1419,9 @@ class Dashboard:
         self.paused = False
         self.msg = ""
         self.started = time.time()
-        self.view = "scan"          # "scan" or "guide"
+        self.view = "scan"          # "scan" (file list), "shares" (per-share panels) or "guide"
+        self.base_view = "scan"     # where "e" returns to
+        self.queue_info = ""        # e.g. "queued 3 · 5 at a time · renaming to -scanned"
         self.guide_scroll = 0
         self.guide_page = 10
         self.guide_known = set()    # types already found when the guide was opened (for NEW tags)
@@ -1340,6 +1431,8 @@ class Dashboard:
         self.dirty = False
         if self.view == "guide":
             return self.render_guide(extra)
+        if self.view == "shares":
+            return self.render_shares(extra)
         e = self.e
         cols, rows = shutil.get_terminal_size((120, 40))
         cols = max(cols, 60)
@@ -1350,10 +1443,12 @@ class Dashboard:
                 f"{time.strftime('%H:%M:%S')}")
         L.append(head)
         L.append(f"{GRAY}{__expansion__}{RESET}")
-        keys = "[q]uit [e]rror guide [f]eed filter [c]lear feed [p]ause"
+        keys = "[q]uit [e]rror guide " + ("[v] shares view " if len(e.files) > 1 else "") + "[f]eed filter [c]lear feed [p]ause"
         if self.mode.startswith("REPLAY"):
             keys += " [+/-] speed [s]kip gap"
         L.append(f"{GRAY}{keys}{RESET}  {extra}  {YELLOW}{self.msg}{RESET}")
+        if self.queue_info:
+            L.append(f"  {CYAN}{self.queue_info}{RESET}")
 
         # files
         L.append(f"{WHITE}FILES{RESET}")
@@ -1361,8 +1456,7 @@ class Dashboard:
             L.append(f"  {YELLOW}{self.waiting}{RESET}")
         L.append(f"{GRAY}  {'status':10s} {'share':>6s} {'file':34s} {'items':>10s} {'issues':>7s} {'errors':>7s} "
                  f"{'warns':>9s} {'elapsed':>8s}  last log time{RESET}")
-        stc = {"COMPLETE": GREEN, "MOVED": GREEN, "ACTIVE": CYAN, "STALLED": RED, "INCOMPLETE": RED,
-               "VANISHED": RED}
+        stc = STATUS_COLOR
         max_files = max(3, min(len(e.files), rows // 5))
         shown = sorted(e.files, key=lambda f: (f.status(self.live, self.stall) == "COMPLETE", -f.last_growth))
         for f in shown[:max_files]:
@@ -1434,6 +1528,64 @@ class Dashboard:
         sys.stdout.write(out)
         sys.stdout.flush()
 
+    def render_shares(self, extra=""):
+        """One panel per share (up to MAX_CONCURRENT_LOGS): totals, top error types, latest items of concern."""
+        e = self.e
+        cols, rows = shutil.get_terminal_size((120, 40))
+        cols = max(cols, 60)
+        keys_all = share_keys(e)
+        # active shares first, then most recently updated
+        def rank(k):
+            fs = [f for f in e.files if f.share_key == k]
+            active = any(f.status(self.live, self.stall) == "ACTIVE" for f in fs)
+            return (not active, -max((f.last_growth for f in fs), default=0))
+        keys_all.sort(key=rank)
+        keys = keys_all[:MAX_CONCURRENT_LOGS]
+        L = [f"{BRIGHT_CYAN}{__title__}{RESET} {GRAY}v{VERSION}{RESET}  {WHITE}{self.mode} - SHARES{RESET}  "
+             f"files {len(e.files)}  shares {len(keys_all)}  lines {e.total_lines:,}  {time.strftime('%H:%M:%S')}",
+             f"{GRAY}[v] file list  [e]rror guide  [q]uit  [p]ause{RESET}  {GRAY}{extra}{RESET}  {YELLOW}{self.msg}{RESET}"]
+        if self.queue_info:
+            L.append(f"  {CYAN}{self.queue_info}{RESET}")
+        if not keys:
+            L.append(f"  {GRAY}(no logs yet){RESET}")
+        n = max(1, len(keys))
+        per = max(5, (rows - len(L) - 2) // n)
+        by_path = {}
+        for ent in e.feed:
+            fobj = e.by_path.get(ent[8])
+            by_path.setdefault(fobj.share_key if fobj else "unknown", []).append(ent)
+        for k in keys:
+            v = ShareView(e, k)
+            st = collections.Counter(f.status(self.live, self.stall) for f in v.files)
+            sts = "  ".join(f"{STATUS_COLOR.get(x, '')}{x}{RESET}" + (f" x{c}" if c > 1 else "") for x, c in st.items())
+            obs = sorted({f.obsid for f in v.files if f.obsid})
+            errs = sum(c for (sv, t), c in v.types.items() if sv == "ERROR")
+            iss = sum(c for (sv, t), c in v.types.items() if sv == "ISSUE")
+            wrn = sum(c for (sv, t), c in v.types.items() if sv == "WARN")
+            items = sum(f.items for f in v.files)
+            P = [f"{WHITE}{'-' * 2} SHARE {k}{RESET}" + (f" {GRAY}obsid {', '.join(obs)}{RESET}" if obs else "")
+                 + f"  {GRAY}logs {len(v.files)}{RESET}  {sts}  items {items:,}  {RED}errors {errs:,}{RESET}"
+                 f"  {YELLOW}issues {iss:,}{RESET}  {CYAN}warnings {wrn:,}{RESET}"]
+            types = sorted(v.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1]))
+            feed = [x for x in by_path.get(k, []) if x[2] in ("ERROR", "ISSUE")
+                    or (x[2] == "NOTE" and x[6] != "monitor")]  # skip routine "scanning/renamed" notices
+            room = per - 1
+            n_types = min(len(types), max(1, room // 2) if feed else room)
+            for (sv, t), c in types[:n_types]:
+                P.append(f"   {SEV_COLOR[sv]}{sv:5s}{RESET} {c:>11,}  {t}")
+            if not types:
+                P.append(f"   {GRAY}no errors yet{RESET}")
+            if len(types) > n_types:
+                P.append(f"   {GRAY}… {len(types) - n_types} more types{RESET}")
+            for tstr, fname, sv, typ, path, text, labels, ln, fpath in feed[-max(0, per - len(P)):]:
+                P.append(f"   {GRAY}{tstr[5:]}{RESET} {SEV_COLOR[sv]}{sv:5s}{RESET} {typ[:38]} {WHITE}{path}{RESET}")
+            L += P[:per]
+        if len(keys_all) > len(keys):
+            L.append(f"{GRAY}  … {len(keys_all) - len(keys)} more shares (all of them are in the summary reports){RESET}")
+        out = "\033[H" + "".join(fit(l, cols) + "\033[K\n" for l in L[:rows - 1]) + "\033[J"
+        sys.stdout.write(out)
+        sys.stdout.flush()
+
     def render_guide(self, extra=""):
         e = self.e
         cols, rows = shutil.get_terminal_size((120, 40))
@@ -1470,7 +1622,7 @@ class Dashboard:
         self.dirty = True
         if self.view == "guide":
             if k in ("e", "E", "ESC", "q", "Q"):
-                self.view = "scan"
+                self.view = self.base_view
             elif k in ("DOWN", "j"):
                 self.guide_scroll += 1
             elif k in ("UP", "k"):
@@ -1487,7 +1639,11 @@ class Dashboard:
                 self.paused = not self.paused
                 self.msg = "PAUSED" if self.paused else ""
             return True
+        if k in ("v", "V") and len(self.e.files) > 1:
+            self.view = self.base_view = ("shares" if self.view == "scan" else "scan")
+            return True
         if k in ("e", "E"):
+            self.base_view = self.view
             self.view = "guide"
             self.guide_scroll = 0
             self.guide_known = set(self.e.types)
@@ -1524,7 +1680,7 @@ def summary_text(engine, live, stall, color=True):
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
         imp = ", ".join(f"{k}={v:,}" for k, v in f.imported.most_common())
-        out.append(f"\n{c(WHITE)}{f.path}{R}  [{f.share_label}" + (f", obsid {f.obsid}" if f.obsid else "") + "]")
+        out.append(f"\n{c(WHITE)}{f.renamed_to or f.path}{R}  [{f.share_label}" + (f", obsid {f.obsid}" if f.obsid else "") + "]")
         out.append(f"  status={f.status(live, stall)}  items={f.items:,}  issues={f.issues:,}  errors={f.errors:,}"
                    f"  warnings={f.warns:,}  elapsed={fmt_dur(el)}")
         out.append(f"  imported by type: {imp or '-'}")
@@ -1569,15 +1725,19 @@ def _md(text):
 
 
 def summary_markdown(engine, live, stall, args=None):
-    """The exit summary as Markdown (same content as the on-screen summary)."""
+    """The exit summary as Markdown (same content as the on-screen summary). `engine` may be a ShareView."""
     sevs = {"ERROR": "🔴 ERROR", "ISSUE": "🟠 ISSUE", "NOTE": "🟣 NOTE", "WARN": "🔵 WARN", "INFO": "INFO"}
-    out = [f"# {__title__} summary", "",
+    per_share = isinstance(engine, ShareView)
+    out = [f"# {__title__} summary" + (f" - {engine.label}" if per_share else " - all shares"), "",
            f"*{__expansion__}*", "",
            "| | |", "|---|---|",
            f"| Version | {__version__} |",
            f"| Host | {HOST} |",
            f"| Mode | {'Live' if live else 'Replay'} |",
-           f"| Source | `{_md(getattr(args, 'source_root', '') or '-')}` |",
+           (f"| Share | {engine.share}" + (" (obsid " + ", ".join(sorted({f.obsid for f in engine.files if f.obsid})) + ")"
+                                            if any(f.obsid for f in engine.files) else "") + " |") if per_share else
+           f"| Shares | {', '.join(share_keys(engine))} |",
+           f"| Source | `{_md(', '.join(f.path for f in engine.files) if per_share else (getattr(args, 'source_root', '') or '-'))}` |",
            f"| Generated | {time.strftime('%Y-%m-%d %H:%M:%S %Z')} |",
            f"| Files | {len(engine.files)} |",
            f"| Lines read | {engine.total_lines:,} |", ""]
@@ -1589,9 +1749,9 @@ def summary_markdown(engine, live, stall, args=None):
             "|---|--:|---|--:|--:|--:|--:|--:|"]
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
-        out.append(f"| {f.status(live, stall)} | {f.share or '?'} | `{_md(f.path)}` | {f.items:,} | {f.issues:,} | {f.errors:,} "
+        out.append(f"| {f.status(live, stall)} | {f.share or '?'} | `{_md(f.renamed_to or f.path)}` | {f.items:,} | {f.issues:,} | {f.errors:,} "
                    f"| {f.warns:,} | {fmt_dur(el)} |")
-    out += ["", "## Count by type (all files)", ""]
+    out += ["", "## Count by type" + (" (this share)" if per_share else " (all shares)"), ""]
     if engine.types:
         out += ["| Severity | Count | Type | Source |", "|---|--:|---|---|"]
         for (sev, t), n in sorted(engine.types.items(), key=lambda kv: (SEV_RANK[kv[0][0]], -kv[1])):
@@ -1618,7 +1778,7 @@ def summary_markdown(engine, live, stall, args=None):
     for f in engine.files:
         el = (f.last_ts - f.first_ts) if (f.first_ts and f.last_ts) else None
         imp = ", ".join(f"{k}={v:,}" for k, v in f.imported.most_common())
-        out += [f"### {f.share_label.capitalize()}" + (f" (obsid {f.obsid})" if f.obsid else "") + f": `{_md(f.path)}`", "",
+        out += [f"### {f.share_label.capitalize()}" + (f" (obsid {f.obsid})" if f.obsid else "") + f": `{_md(f.renamed_to or f.path)}`", "",
                 f"- Status: **{f.status(live, stall)}**, elapsed {fmt_dur(el)}",
                 f"- Items {f.items:,} · issues {f.issues:,} · errors {f.errors:,} · warnings {f.warns:,}",
                 f"- Imported by type: {imp or '-'}", ""]
@@ -1638,30 +1798,32 @@ def errlog_temp_path():
     # tidy up temp logs left by runs that were killed (older than a day)
     try:
         for fn in os.listdir(SAVE_DIR):
-            if fn.startswith(".catalyst_") and fn.endswith("_errors.tmp"):
+            if fn.startswith(".catalyst_") and fn.endswith(".tmp") and "_errors" in fn:
                 fp = os.path.join(SAVE_DIR, fn)
                 if time.time() - os.path.getmtime(fp) > 86400:
                     os.remove(fp)
     except OSError:
         pass
-    return os.path.join(SAVE_DIR, f".catalyst_{HOST}_{RUN_STAMP}_{os.getpid()}_errors.tmp")
+    return os.path.join(SAVE_DIR, f".catalyst_{HOST}_{RUN_STAMP}_{os.getpid()}_errors")
 
 
 def _export(engine, args, live):
-    """Offer (or, with -x, just do) export of the Markdown summary + full error log."""
-    tmp = engine.errlog_path
+    """Offer (or, with -x, just do) export of the Markdown summaries + full error logs, one set per share."""
+    temps = [ent["path"] for ent in engine.errlogs.values()]
+    keys = share_keys(engine)
     target = args.export
     if target == "":  # -x with no folder: use the output directory
         target = SAVE_DIR
     if target is None and sys.stdin.isatty() and not args.no_prompt:
         print("-" * 69)
-        a = ask(f"Export a Markdown summary report and the full log of all {engine.errlog_count:,} errors/issues?"
-                f" (y/N)", "n")
+        a = ask(f"Export Markdown summary reports and full error logs ({engine.errlog_count:,} errors/issues),"
+                f" one per share ({len(keys)})? (y/N)", "n")
         if a.lower().startswith("y"):
             target = ask("Folder to write them to", SAVE_DIR)
     if not target:
-        if tmp and os.path.exists(tmp):
-            os.remove(tmp)
+        for t in temps:
+            if os.path.exists(t):
+                os.remove(t)
         return []
     target = os.path.abspath(os.path.expanduser(target))
     try:
@@ -1670,22 +1832,32 @@ def _export(engine, args, live):
         print(f"{RED}Can't create {target}: {e}{RESET}")
         return []
     base = os.path.join(target, f"catalyst_{HOST}_{RUN_STAMP}")
-    md_path, err_path = base + "_summary.md", base + "_errors.log"
     written = []
-    try:
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(summary_markdown(engine, live, args.stall_secs, args))
-        written.append(md_path)
-        print(f"Summary report (Markdown): {md_path}")
-    except OSError as e:
-        print(f"{RED}Couldn't write {md_path}: {e}{RESET}")
-    if tmp and os.path.exists(tmp):
+
+    def write(path, text, label):
         try:
-            shutil.move(tmp, err_path)
-            written.append(err_path)
-            print(f"Full error log ({engine.errlog_count:,} entries): {err_path}")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            written.append(path)
+            print(f"{label}: {path}")
         except OSError as e:
-            print(f"{RED}Couldn't write {err_path}: {e}{RESET}")
+            print(f"{RED}Couldn't write {path}: {e}{RESET}")
+
+    if len(keys) > 1:
+        write(base + "_summary.md", summary_markdown(engine, live, args.stall_secs, args), "Summary, all shares (Markdown)")
+    for key in keys:
+        view = ShareView(engine, key)
+        write(f"{base}_share{key}_summary.md", summary_markdown(view, live, args.stall_secs, args),
+              f"Summary, {view.label} (Markdown)")
+        ent = engine.errlogs.get(key)
+        if ent and os.path.exists(ent["path"]):
+            err_path = f"{base}_share{key}_errors.log"
+            try:
+                shutil.move(ent["path"], err_path)
+                written.append(err_path)
+                print(f"Error log, {view.label} ({ent['count']:,} entries): {err_path}")
+            except OSError as e:
+                print(f"{RED}Couldn't write {err_path}: {e}{RESET}")
     return written
 
 
@@ -1887,6 +2059,36 @@ def _ino(p):
         return None
 
 
+def is_anvil_dir(root):
+    """True when scanning the Anvil's running-assimilation folder (where Hammerspace itself moves logs away)."""
+    a = os.path.abspath(DEFAULT_LIVE_DIR)
+    r = os.path.abspath(root)
+    return r == a or r.startswith(a + os.sep)
+
+
+def mark_scanned(engine, fs, rename):
+    """A log outside the Anvil folder has been read to the end: rename it to *-scanned (unless disabled)."""
+    fs.scanned = True
+    if fs.fh:
+        try:
+            fs.fh.close()
+        except OSError:
+            pass
+        fs.fh = None
+    if not rename:
+        engine.event("NOTE", "Log fully scanned", fs, fs.path)
+        return
+    new = fs.path + SCANNED_SUFFIX
+    if os.path.exists(new):
+        new = f"{fs.path}{SCANNED_SUFFIX}-{time.strftime('%Y%m%d%H%M%S')}"
+    try:
+        os.rename(fs.path, new)
+        fs.renamed_to = new
+        engine.event("NOTE", "Log fully scanned - renamed", fs, new)
+    except OSError as e:
+        engine.event("NOTE", f"Log fully scanned - couldn't rename ({e.strerror or e})", fs, fs.path)
+
+
 def run_live(args, cfg):
     target = args.dir or DEFAULT_LIVE_DIR
     note_shown = False
@@ -1916,7 +2118,13 @@ def run_live(args, cfg):
         if args.no_prompt or args.dir:
             return 2
         target = DEFAULT_LIVE_DIR if target != DEFAULT_LIVE_DIR else os.getcwd()
+    limited = not is_anvil_dir(root)   # logs outside the Anvil folder: 5 at a time, renamed when done
+    rename = limited and not args.no_rename
     from_start = args.from_start
+    if limited:
+        if from_start is False:
+            print(f"{YELLOW}--from-end ignored: logs outside {DEFAULT_LIVE_DIR} are scanned from the beginning.{RESET}")
+        from_start = True
     if from_start is None:
         from_start = True
         if not args.no_prompt:
@@ -1929,8 +2137,17 @@ def run_live(args, cfg):
 
     engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain,
                     errlog=errlog_temp_path())
-    files = discover(root, pattern)
-    for p in files:
+    def found_logs():
+        found = discover(root, pattern)
+        if limited:  # oldest first, and never the ones already renamed
+            found = [p for p in found if not p.endswith(SCANNED_SUFFIX) and SCANNED_SUFFIX + "-" not in os.path.basename(p)]
+            found.sort(key=lambda p: (os.path.getmtime(p) if os.path.exists(p) else 0, p))
+        return found
+
+    queue = collections.deque()
+    queued = set()
+
+    def start_log(p):
         fs = engine.add_file(p)
         try:
             st = os.stat(p)
@@ -1939,7 +2156,29 @@ def run_live(args, cfg):
                 fs.offset, fs.ino = st.st_size, st.st_ino
         except OSError:
             pass
+        return fs
+
+    def running():
+        return [f for f in engine.files if not f.scanned and not f.gone]
+
+    def admit():
+        while queue and (not limited or len(running()) < MAX_CONCURRENT_LOGS):
+            p = queue.popleft()
+            queued.discard(p)
+            if os.path.exists(p):
+                fs = start_log(p)
+                if limited:
+                    engine.event("NOTE", "Scanning log", fs, p)
+
+    files = found_logs()
+    for p in files:
+        queue.append(p)
+        queued.add(p)
+    admit()
     print(f"Monitoring {desc}")
+    if limited:
+        print(f"Logs outside {DEFAULT_LIVE_DIR}: scanning {MAX_CONCURRENT_LOGS} at a time"
+              + (f"; each is renamed to <name>{SCANNED_SUFFIX} when done." if rename else " (--no-rename: not renaming)."))
     print(f"Output directory: {SAVE_DIR}")
     if files:
         print(f"Found {len(files)} log(s). Checking for new ones every {args.rescan:g}s…")
@@ -1950,6 +2189,13 @@ def run_live(args, cfg):
     dash = None if args.plain else Dashboard(engine, "LIVE", root, True, args.stall_secs)
     if dash:
         dash.waiting = f"no assimilation log yet - waiting for a new run under {root}"
+
+    def queue_info():
+        if not limited:
+            return ""
+        done = sum(1 for f in engine.files if f.scanned)
+        return (f"scanning {len(running())} of max {MAX_CONCURRENT_LOGS} · queued {len(queue)} · done {done}"
+                + (f" · finished logs are renamed to *{SCANNED_SUFFIX}" if rename else ""))
     last_scan = time.time()
     last_draw = 0
     if dash:
@@ -1960,11 +2206,28 @@ def run_live(args, cfg):
                 t0 = time.time()
                 busy = False
                 for fs in list(engine.files):
-                    if read_new(engine, fs, args.chunk_mb * 1024 * 1024):
+                    if fs.scanned:
+                        continue
+                    got = read_new(engine, fs, args.chunk_mb * 1024 * 1024)
+                    if got:
                         busy = True
+                    elif limited and not fs.gone:
+                        try:
+                            at_end = fs.offset >= os.path.getsize(fs.path)
+                        except OSError:
+                            at_end = False
+                        if at_end and (fs.completed or time.time() - fs.last_growth > SETTLE_SECS):
+                            if fs.partial:
+                                engine.process_line(fs, fs.partial.decode("utf-8", "replace").rstrip("\r"))
+                                fs.truncated_tail = not fs.completed
+                                fs.partial = b""
+                            engine.flush_entry(fs)
+                            mark_scanned(engine, fs, rename)
+                            admit()
+                            continue
                     if time.time() - t0 > 0.3:
                         break
-                    if (not fs.completed and not fs.gone and not fs.alerted_stall
+                    if (not limited and not fs.completed and not fs.gone and not fs.alerted_stall
                             and time.time() - fs.last_growth > args.stall_secs):
                         fs.alerted_stall = True
                         if fs.partial:
@@ -1973,11 +2236,20 @@ def run_live(args, cfg):
                                      f"{fs.path} (idle {int(time.time() - fs.last_growth)}s)")
                 if time.time() - last_scan > args.rescan:
                     last_scan = time.time()
-                    for p in discover(root, pattern):
+                    for p in found_logs():
+                        if p in queued:
+                            continue
                         old = engine.by_path.get(p)
                         if old is None or (old.gone and (WINDOWS or _ino(p) != old.ino)):
-                            fs = engine.add_file(p)
-                            engine.event("NOTE", "New assimilation log detected", fs, p)
+                            if limited:
+                                queue.append(p)
+                                queued.add(p)
+                            else:
+                                fs = start_log(p)
+                                engine.event("NOTE", "New assimilation log detected", fs, p)
+                    admit()
+                if dash:
+                    dash.queue_info = queue_info()
                 if dash and (dash.dirty or (not dash.paused and time.time() - last_draw > args.refresh)):
                     dash.render()
                     last_draw = time.time()
@@ -2070,22 +2342,41 @@ def run_replay(args, cfg):
 
     engine = Engine(watches, args.match_paths, matches_csv=args.matches_csv, plain=args.plain,
                     errlog=errlog_temp_path())
-    states = [engine.add_file(p) for p in files]
-    streams = [record_stream(fs, engine) for fs in states]
+    # At most MAX_CONCURRENT_LOGS logs are replayed together. When one finishes the next starts, shifted in
+    # time so it begins "now" on the replay clock (its own log times are still shown per file).
+    pending = collections.deque(files)
+    states, streams, offsets = [], [], []
     heap = []
     seq = 0
-    for i, s in enumerate(streams):
-        nxt = next(s, None)
-        if nxt:
-            heapq.heappush(heap, (nxt[0], seq, i, nxt[1]))
+    clock = {"last": None}
+
+    def start_next():
+        nonlocal seq
+        while pending and sum(1 for f in states if not f.eof) < MAX_CONCURRENT_LOGS:
+            fs = engine.add_file(pending.popleft())
+            st = record_stream(fs, engine)
+            i = len(states)
+            states.append(fs)
+            streams.append(st)
+            nxt = next(st, None)
+            if not nxt:
+                fs.eof = True
+                offsets.append(0.0)
+                continue
+            off = 0.0
+            if clock["last"] is not None and nxt[0] < clock["last"]:
+                off = clock["last"] - nxt[0]
+            offsets.append(off)
+            heapq.heappush(heap, (nxt[0] + off, seq, i, nxt[1]))
             seq += 1
-        else:
-            states[i].eof = True
+
+    start_next()
 
     dash = None if args.plain else Dashboard(engine, "REPLAY", root, False, args.stall_secs)
     vclock = heap[0][0] if heap else 0.0  # virtual log time "now"
     last_wall = time.time()
     last_log = vclock
+    clock["last"] = last_log
     last_draw = 0
     if dash:
         enter_screen()
@@ -2108,15 +2399,18 @@ def run_replay(args, cfg):
                         break
                     heapq.heappop(heap)
                     last_log = max(last_log, ts)
+                    clock["last"] = last_log
                     fs = states[i]
                     for line in rec:
                         engine.process_line(fs, line)
                     nxt = next(streams[i], None)
                     if nxt:
-                        heapq.heappush(heap, (nxt[0], seq, i, nxt[1]))
+                        heapq.heappush(heap, (nxt[0] + offsets[i], seq, i, nxt[1]))
                         seq += 1
                     else:
                         fs.eof = True
+                        engine.flush_entry(fs)
+                        start_next()
                     if time.time() - t0 > 0.25:
                         break
                 if speed > 0 and vclock > last_log + 2:
@@ -2126,11 +2420,15 @@ def run_replay(args, cfg):
                         dash.msg = "REPLAY COMPLETE - press q to exit" if dash.view == "scan" else "REPLAY COMPLETE"
                     else:
                         break
+                if dash:
+                    dash.queue_info = (f"replaying {sum(1 for f in states if not f.eof)} of max {MAX_CONCURRENT_LOGS}"
+                                       f" · queued {len(pending)} · done {sum(1 for f in states if f.eof)}"
+                                       if len(files) > MAX_CONCURRENT_LOGS else "")
                 if dash and (dash.dirty or time.time() - last_draw > args.refresh):
                     sp = "max" if speed <= 0 else f"{speed:g}x"
                     lt = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(last_log)) if last_log else "-"
                     dash.mode = f"REPLAY {sp}"
-                    dash.render(extra=f"log clock {lt}")
+                    dash.render(extra=f"replay clock {lt}")
                     last_draw = time.time()
                 k = keys.get(0 if (heap and (speed <= 0)) else 0.05)
                 if k:
@@ -2195,7 +2493,7 @@ def main(argv=None):
         prog="catalyst",
         description=f"{__fullname__}\nv{__version__} - live monitor & replay for Hammerspace assimilation logs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=SUPPORT_NOTE + "\n\nKeys while running: q quit, e error guide (scan keeps running; e/Esc to return), "
+        epilog=SUPPORT_NOTE + "\n\nKeys while running: q quit, e error guide (scan keeps running; e/Esc to return), v switch file list / per-share view, "
                "f cycle feed filter, c clear feed, p pause, +/- replay speed, "
                "s skip to next record (replay).\nCustom watch items: plain text or re:<regex>; prefix "
                "E: I: W: N: to set severity, e.g.  --add 'E:re:err=(5|28)'")
@@ -2223,6 +2521,8 @@ def main(argv=None):
     ap.add_argument("--plain", action="store_true", help="no dashboard; print matching lines like grep, summary at end")
     ap.add_argument("--report", help="write the final summary to this text file")
     ap.add_argument("--matches-csv", help="write every matched line to this CSV")
+    ap.add_argument("--no-rename", action="store_true",
+                    help=f"(live, outside {DEFAULT_LIVE_DIR}) don't rename logs to <name>{SCANNED_SUFFIX} after scanning")
     ap.add_argument("-O", "--output-dir", metavar="DIR", default=DEFAULT_OUTPUT_DIR,
                     help=f"where reports, CSV, exports and upload bundles are written (default {DEFAULT_OUTPUT_DIR};"
                          f" env CATALYST_OUT)")

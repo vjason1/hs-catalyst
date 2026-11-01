@@ -17,7 +17,7 @@ Live monitor and replay tool for Hammerspace assimilation logs (`HS_root.log`). 
 
 ```bash
 python3 catalyst.py replay -d /mnt/finance   # end users: completed logs in a share's assimilation-logs folder
-python3 catalyst.py -d /mnt/finance          # end users: watch a share for newly completed logs
+python3 catalyst.py -d /mnt/finance          # end users: scan a share's logs, 5 at a time, renaming each to *-scanned
 python3 catalyst.py                          # Hammerspace support, on the Anvil: watch running assimilations
 python3 catalyst.py -h                       # all options
 ```
@@ -63,7 +63,20 @@ Point the tool at the share, or at its `assimilation-logs` folder. Use `replay` 
 | `MOVED` | Completed and moved to the share's `assimilation-logs` folder (normal) |
 | `STALLED` | No growth for `--stall-secs` and no completion line |
 | `VANISHED` | Log disappeared before completing |
-| `INCOMPLETE` | Replay: log ended without `Assimilation complete` |
+| `SCANNED` | Outside the Anvil folder: read to the end (and renamed to `*-scanned`) |
+| `INCOMPLETE` | Log ended without `Assimilation complete` (replay, or a scanned log outside the Anvil folder) |
+
+## Scanning completed logs: 5 at a time
+
+Hammerspace runs at most **5 assimilations at once**, so the tool never needs to handle more than 5 logs together. When you scan anywhere **other than** the Anvil's `/pd/assimilation-logs` folder (for example a share's `assimilation-logs` folder):
+
+- **At most 5 logs are scanned at a time,** oldest first. The rest wait in a queue, shown at the top of the dashboard (`scanning 3 of max 5 · queued 4 · done 2`).
+- **Each finished log is renamed** to end in `-scanned` (for example `COM.X_1724094740_HS_root.log-scanned`) before the next one starts. A log counts as finished when it has been read to the end and contains `Assimilation complete`, or when it has sat unchanged at the end for 10 seconds without one; that log is marked `INCOMPLETE`.
+- **Renamed logs aren't picked up again,** so running the tool on the same folder later only scans new logs.
+- **To scan without renaming,** use `--no-rename`.
+- Existing logs are always read from the beginning (`--from-end` is ignored here).
+
+In the Anvil folder, logs are never renamed: Hammerspace moves them itself. **Replay** also plays at most 5 logs at a time (the next starts as one finishes) but never renames files.
 
 ## What to monitor
 
@@ -122,7 +135,8 @@ Skipped lines are counted by reason (for example *Skipped - file not seen on the
 | Key | Action |
 |---|---|
 | `q` | Quit and show the summary (Ctrl-C also works). In the error guide, `q` returns to the scan instead. |
-| `e` | Open the **error guide** while the scan keeps running (see below). `e` or `Esc` returns to the scan. |
+| `e` | Open the **error guide** while the scan keeps running (see below). `e` or `Esc` returns to the screen you came from. |
+| `v` | When more than one log is being scanned: switch between the **file list** and the **shares view** (see below). |
 | `f` | Change the feed filter: all, errors and issues, errors only |
 | `c` | Clear the feed |
 | `p` | Pause |
@@ -143,6 +157,17 @@ python3 catalyst.py -O ~/catalyst-reports -x     # export into ~/catalyst-report
 - `-u` saves, and uploads when stopped without asking.
 
 The upload bundles both files as a `.tar.gz` and POSTs them to the Hammerspace endpoint the same way as `dme-watch.sh`. It uses `curl` if installed, or a built-in HTTP upload otherwise. Override the endpoint with `--upload-url` or `CATALYST_UPLOAD_URL`.
+
+## Shares view
+
+When more than one log is being scanned, press **`v`** to swap the scrolling file list for a dashboard of errors **per share ID**, and `v` again to go back. There's a panel for each share, up to 5 (the most assimilations Hammerspace runs at once), with active shares first:
+
+- Share ID, obsid(s), number of logs and their status
+- Items, errors, issues and warnings for that share
+- Its most frequent error types
+- Its latest items of concern (log time, type, affected path)
+
+If more than 5 shares are present, the rest are noted at the bottom and are still in the summary reports.
 
 ## Error guide (while scanning)
 
@@ -243,15 +268,16 @@ Hammerspace does not currently support alternate data streams, so these are not 
 When you quit, the summary is printed on screen and you're asked:
 
 ```
-Export a Markdown summary report and the full log of all N errors/issues? (y/N)
+Export Markdown summary reports and full error logs (N errors/issues), one per share (S)? (y/N)
 ```
 
 If you answer **y**, it asks for a folder (default: the output directory, `/tmp` unless changed with `-O`) and writes:
 
 | File | Contents |
 |---|---|
-| `catalyst_<host>_<timestamp>_summary.md` | The exit summary in Markdown: highlights, files, count by type, watch items, top unmapped SIDs, per-file breakdown, and any log entries not recognised |
-| `catalyst_<host>_<timestamp>_errors.log` | Every ERROR, ISSUE and NOTE line found, each with log time, severity, type, share ID, log file and line number, affected path, and the original log line. Warnings are counted in the summary but not listed, since logs can have millions of them. |
+| `catalyst_<host>_<timestamp>_share<ID>_summary.md` | **One per share.** That share's summary in Markdown: highlights, files, count by type, watch items, top unmapped SIDs, what the errors mean, per-file breakdown, and any log entries not recognised |
+| `catalyst_<host>_<timestamp>_share<ID>_errors.log` | **One per share.** Every ERROR, ISSUE and NOTE line found in that share's logs, each with log time, severity, type, share ID, log file and line number, affected path, and the original log line. Warnings are counted in the summary but not listed, since logs can have millions of them. |
+| `catalyst_<host>_<timestamp>_summary.md` | When more than one share was scanned: an overview of all shares together |
 
 Use `-x [DIR]` to export without being asked (default folder: the output directory). If you're also saving with `-o` / `-u`, the exported files are included in the upload bundle.
 
@@ -274,7 +300,8 @@ Send these entries to Hammerspace so the tool can learn them? (y/N)
 python3 catalyst.py -o                                    # watch, save, ask about upload at the end
 python3 catalyst.py -y -u                                 # unattended, upload on exit
 python3 catalyst.py -x ~/reports                          # export Markdown summary + error log on exit
-python3 catalyst.py -d /mnt/finance                       # watch a share for newly completed logs
+python3 catalyst.py -d /mnt/finance                       # scan a share's completed logs (5 at a time, renamed to *-scanned)
+python3 catalyst.py -d /mnt/finance --no-rename           # same, without renaming the logs
 python3 catalyst.py replay -d ./logs --speed 20           # replay at 20x
 python3 catalyst.py replay -y -d ./logs --speed max \
     --plain --report report.txt --matches-csv hits.csv    # analyze all logs fast, grep-style
@@ -295,6 +322,7 @@ python3 catalyst.py simulate old_HS_root.log test/HS_root.log   # write a log ou
 
 | Version | Changes |
 |---|---|
+| 2.5.4 | Summary report and full error log exported per share (plus an all-shares overview). `v` switches between the file list and a per-share dashboard (up to 5 shares). Outside the Anvil folder, at most 5 logs are scanned at a time and each finished log is renamed to `*-scanned` (`--no-rename` to skip). Replay plays at most 5 logs at a time. |
 | 2.5.3 | Share ID (from each log's header) shown wherever results from several logs appear: FILES table, count by type, error guide, live feed, highlights, summaries, error log, CSV, unknown-entry file. |
 | 2.5.2 | `e` opens an error guide while the scan keeps running: types found so far first (live counts, NEW tags, SID lookups), then the other known types. Arrow/Page/Home/End keys. |
 | 2.5.1 | Completed logs shown in their dated folder: `<share>/assimilation-logs/<date-time stamp>/<log>`. |
